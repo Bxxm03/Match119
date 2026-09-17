@@ -1,0 +1,94 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 스펙 02절 — "시작"에서 한 번에 받는 것들.
+         버블을 쓰는 도중 권한 팝업이 뜨면 그게 곧 처치 방해이므로 미루지 않는다. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- 백그라운드 마이크 캡처는 Android 14(API 34)부터 microphone 타입이 필수다.
+         타입 선언이 없으면 서비스 시작 즉시 크래시한다. 시험 기기가 API 34라
+         이 규제가 실제로 걸린다. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- 캡슐 오버레이는 flutter_overlay_window가 자체 포그라운드 서비스로 띄우고,
+         그 서비스 타입이 specialUse라 권한이 따로 필요하다. 즉 서비스가 두 개
+         돈다 — 녹음용(microphone)과 캡슐 표시용(specialUse). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- 개발 중에는 adb reverse로 개발 PC의 http 백엔드를 쓴다. 실서비스에서는
+         Cloud Run의 https만 쓰게 되므로 이 예외는 그때 제거한다. -->
+    <application
+        android:usesCleartextTraffic="true"
+        android:label="rapid_app"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <!-- flutter_foreground_task의 서비스 — 녹음·분석을 소유한다.
+             이름은 플러그인이 고정하므로 바꾸면 안 된다. -->
+        <!-- stopWithTask: 최근앱에서 앱을 닫으면 서비스도 함께 끝낸다.
+             앱 프로세스가 죽으면 Dart 정리 코드가 돌 수 없으므로 OS에 맡긴다.
+             대가: 녹음 중에 실수로 앱을 닫으면 그 녹음은 사라진다(사용자 결정). -->
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:foregroundServiceType="microphone"
+            android:stopWithTask="true"
+            android:exported="false" />
+
+        <!-- flutter_overlay_window의 서비스 — 캡슐을 화면 위에 그린다.
+             플러그인이 자기 매니페스트에 권한만 넣고 이 선언은 하지 않으므로
+             앱에서 직접 해 줘야 한다. 빠뜨리면 "OverlayService ... not found"로
+             캡슐이 조용히 안 뜬다. -->
+        <service
+            android:name="flutter.overlay.window.flutter_overlay_window.OverlayService"
+            android:exported="false"
+            android:stopWithTask="true"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="구급 현장에서 기존 119 시스템 화면 위에 녹음·분석 캡슐을 표시" />
+        </service>
+
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+</manifest>

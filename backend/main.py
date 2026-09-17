@@ -1,0 +1,229 @@
+import asyncio
+import base64
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+# Windows 콘솔 기본 인코딩(cp949)이 한글 로그의 em-dash 등을 못 받아써서
+# 요청 처리 중 서버가 죽었다. 프린트문마다 고치는 대신 stdout 자체를 UTF-8로
+# 고정해 이 클래스의 크래시를 통째로 없앤다.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+import httpx
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, HTTPException, UploadFile
+
+load_dotenv(Path(__file__).parent / ".env")
+
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+# 별칭을 기본값으로 둔다. 특정 버전을 박아 두면 그 모델이 내려갈 때 404로 죽는다
+# (파일럿에서 gemini-2.5-flash가 그렇게 죽었다).
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+app = FastAPI()
+
+
+@app.get("/api/health")
+async def health():
+    """앱이 백엔드를 찾았는지 확인하는 용도. 키 값은 노출하지 않는다."""
+    return {"ok": True, "model": GEMINI_MODEL, "key_configured": bool(GEMINI_API_KEY)}
+
+# 대화 원문 표현 + 의학용어 병기(기본 필드) / ai_impression은 질환군명 수준까지만 / reasons는 평이한 관찰언어
+# — EMS_기획안_v2.md 03번 섹션 스키마·원칙 그대로.
+SCHEMA_PROMPT = """다음 오디오는 구급대원과 환자(또는 보호자) 간 실제 대화 녹음이다. 사진이 함께 제공되면 시각적 소견도 참고하라.
+아래 JSON 스키마 형식으로만 응답하라 (설명 문장, 코드블록 없이 JSON 객체만):
+
+{
+  "chief_complaint": "주증상 — 대화 원문 표현에 의학용어를 괄호로 병기",
+  "past_history": "과거력(다니는 병원 포함)",
+  "onset": "발병시점",
+  "last_normal_time": "마지막 정상확인시간",
+  "guardian": "보호자 동승 여부",
+  "etc": "기타 특이사항",
+  "ai_impression": "의심 소견 — 대원이 현장에서 쓰는 질환군명 수준까지만, 세부 임상분류 제외. 확정 진단 아님",
+  "reasons": ["근거1 — 평이한 관찰언어로만, 의학용어·진단명 쓰지 않음", "근거2"]
+}
+
+대화에서 확인할 수 없는 필드는 빈 문자열로 남겨라."""
+
+
+def _audio_mime(filename: str | None, content_type: str | None) -> str:
+    """Gemini가 디코딩할 수 있는 오디오 MIME을 고른다.
+
+    Flutter의 MultipartFile은 content-type을 지정하지 않으면
+    application/octet-stream을 보낸다. 그대로 넘기면 Gemini가 무엇인지 몰라
+    처리하지 못하므로, 확장자로 실제 타입을 정한다.
+    """
+    if content_type and content_type.startswith("audio/"):
+        return content_type
+
+    ext = Path(filename or "").suffix.lower()
+    return {
+        ".m4a": "audio/mp4",
+        ".mp4": "audio/mp4",
+        ".aac": "audio/aac",
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".ogg": "audio/ogg",
+        ".opus": "audio/ogg",
+        ".webm": "audio/webm",
+        ".flac": "audio/flac",
+    }.get(ext, "audio/mp4")
+
+
+async def upload_file(
+    client: httpx.AsyncClient, data: bytes, mime: str, display_name: str
+) -> str:
+    """Files API에 올리고 참조용 URI를 돌려준다."""
+    start = await client.post(
+        f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={GEMINI_API_KEY}",
+        headers={
+            "X-Goog-Upload-Protocol": "resumable",
+            "X-Goog-Upload-Command": "start",
+            "X-Goog-Upload-Header-Content-Length": str(len(data)),
+            "X-Goog-Upload-Header-Content-Type": mime,
+            "Content-Type": "application/json",
+        },
+        json={"file": {"display_name": display_name}},
+    )
+    if start.status_code != 200:
+        raise HTTPException(400, f"파일 업로드 시작 실패({start.status_code}): {start.text}")
+
+    upload_url = start.headers.get("x-goog-upload-url")
+    if not upload_url:
+        raise HTTPException(400, "파일 업로드 URL을 받지 못했습니다")
+
+    done = await client.post(
+        upload_url,
+        headers={
+            "Content-Length": str(len(data)),
+            "X-Goog-Upload-Offset": "0",
+            "X-Goog-Upload-Command": "upload, finalize",
+        },
+        content=data,
+    )
+    if done.status_code != 200:
+        raise HTTPException(400, f"파일 업로드 실패({done.status_code}): {done.text}")
+
+    uri = done.json().get("file", {}).get("uri")
+    if not uri:
+        raise HTTPException(400, "업로드된 파일 URI를 받지 못했습니다")
+    print(f"[analyze] uploaded -> {uri}")
+    return uri
+
+
+async def delete_uploaded_file(client: httpx.AsyncClient, file_uri: str) -> None:
+    """분석이 끝나면 Files API에 올려둔 사본을 지운다.
+
+    Gemini 유료 티어는 프롬프트·응답을 학습에 안 쓰지만(Zero Data Retention),
+    Files API로 올린 파일은 예외다 — 사용자가 직접 지워야 완전한 ZDR이 된다
+    (https://ai.google.dev/gemini-api/docs/zdr). 지우지 않으면 환자 음성이
+    구글 쪽에 기본 48시간 남는다. 분석 성공·실패와 무관하게 항상 호출한다.
+    """
+    name = file_uri.rsplit("/files/", 1)[-1]
+    try:
+        res = await client.delete(
+            f"https://generativelanguage.googleapis.com/v1beta/files/{name}",
+            params={"key": GEMINI_API_KEY},
+        )
+        if res.status_code == 200:
+            print(f"[analyze] 파일 삭제됨 -> {file_uri}")
+        else:
+            print(f"[analyze] 파일 삭제 실패({res.status_code}): {res.text}")
+    except httpx.HTTPError as e:
+        # 삭제 실패로 분석 자체를 실패시키지는 않는다 — 이미 대원에게 결과를
+        # 주는 게 우선이다. 대신 로그에 남겨 놓쳤을 때 추적할 수 있게 한다.
+        print(f"[analyze] 파일 삭제 중 오류: {e}")
+
+
+def strip_code_fence(text: str) -> str:
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    return match.group(0) if match else text
+
+
+@app.post("/api/analyze")
+async def analyze(audio: UploadFile = File(...), photo: list[UploadFile] = File(default=[])):
+    if not GEMINI_API_KEY:
+        raise HTTPException(500, "backend/.env 에 GEMINI_API_KEY가 없음")
+
+    parts = [{"text": SCHEMA_PROMPT}]
+
+    audio_bytes = await audio.read()
+    audio_mime = _audio_mime(audio.filename, audio.content_type)
+    print(f"[analyze] audio={audio.filename} mime={audio_mime} bytes={len(audio_bytes)}")
+
+    # 오디오는 Files API로 올린 뒤 URI로 참조한다.
+    # inline_data로 넣으면 최신 flash 계열이 오디오를 조용히 버리고
+    # (응답 usage의 promptTokensDetails에 AUDIO가 아예 안 잡힌다) 프롬프트만 보고
+    # 그럴듯한 케이스를 지어낸다 — 환자 정보가 통째로 발명되는 셈이라 위험하다.
+    async with httpx.AsyncClient(timeout=75.0) as upload_client:
+        audio_uri = await upload_file(
+            upload_client, audio_bytes, audio_mime, audio.filename or "audio"
+        )
+    parts.append({"file_data": {"mime_type": audio_mime, "file_uri": audio_uri}})
+
+    # 사진은 작아서 inline으로 충분하다(이미지는 정상 처리됨).
+    for p in photo[:3]:
+        photo_bytes = await p.read()
+        parts.append({
+            "inline_data": {
+                "mime_type": p.content_type or "image/jpeg",
+                "data": base64.b64encode(photo_bytes).decode(),
+            }
+        })
+
+    try:
+        # 최신 flash 계열은 응답 전에 추론을 하므로 30초로는 긴 대화가 잘린다.
+        # 앱 쪽 타임아웃(90초)보다 짧게 두어, 서버가 먼저 이유 있는 에러를 만들게 한다.
+        async with httpx.AsyncClient(timeout=75.0) as client:
+            for attempt in range(3):  # Gemini 503(과부하)는 흔히 발생 — 최대 2회 재시도
+                try:
+                    res = await client.post(
+                        GEMINI_URL,
+                        params={"key": GEMINI_API_KEY},
+                        json={"contents": [{"parts": parts}]},
+                    )
+                except httpx.TimeoutException:
+                    # 502/504는 Cloudflare 터널이 자체 에러 페이지로 덮어써서 클라이언트에 원인이 안 보임 — 400 사용
+                    raise HTTPException(400, "Gemini 응답 시간 초과")
+
+                if res.status_code == 503 and attempt < 2:
+                    print(f"[gemini] 503 과부하, 재시도 {attempt + 1}/2")
+                    await asyncio.sleep(1.5)
+                    continue
+                break
+    finally:
+        # 분석이 성공하든 실패하든 환자 음성 사본은 구글 쪽에 남겨두지 않는다.
+        async with httpx.AsyncClient(timeout=15.0) as del_client:
+            await delete_uploaded_file(del_client, audio_uri)
+
+    if res.status_code != 200:
+        print(f"[gemini] status={res.status_code} body={res.text}")
+        raise HTTPException(400, f"Gemini API 오류({res.status_code}): {res.text}")
+
+    body = res.json()
+
+    # 오디오가 실제로 모델 입력에 잡혔는지 남긴다. AUDIO가 0이면 모델이 소리를
+    # 못 듣고 프롬프트만 보고 답을 지어낸 것이므로, 결과를 믿어선 안 된다.
+    usage = body.get("usageMetadata", {})
+    modalities = {
+        d.get("modality"): d.get("tokenCount")
+        for d in usage.get("promptTokensDetails", [])
+    }
+    print(f"[analyze] usage={modalities} thoughts={usage.get('thoughtsTokenCount')}")
+    if not modalities.get("AUDIO"):
+        print("[analyze] 경고: 입력에 AUDIO 토큰이 없다 — 오디오가 모델에 닿지 않았다")
+
+    # 최신 모델은 parts에 thought 블록을 먼저 넣기도 해서, 첫 part만 보면
+    # text가 비어 있을 수 있다. text가 있는 part를 찾아 이어붙인다.
+    parts = body.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+    text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+    try:
+        result = json.loads(strip_code_fence(text))
+    except json.JSONDecodeError:
+        raise HTTPException(400, f"Gemini 응답 JSON 파싱 실패: {text}")
+
+    return result
