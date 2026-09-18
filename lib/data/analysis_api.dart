@@ -43,11 +43,13 @@ class AnalysisApi {
   Future<AnalysisResult> analyze({
     required File audio,
     List<File> photos = const [],
+    int durationSeconds = 0,
   }) async {
     final request = http.MultipartRequest(
       'POST',
       Uri.parse('$baseUrl/api/analyze'),
     );
+    request.fields['duration_seconds'] = durationSeconds.toString();
 
     request.files.add(await http.MultipartFile.fromPath('audio', audio.path));
     for (final photo in photos.take(3)) {

@@ -140,9 +140,14 @@ class RealAssistantController
         return;
       }
 
+      // showOverlay()의 width/height는 dp가 아니라 그대로 픽셀로 쓰인다
+      // (플러그인 버그 — resizeOverlay()만 dp 변환을 한다). 460을 dp로 알고
+      // 넘겼더니 밀도 높은 기기(S25)에서 실제 폭이 훨씬 좁게 생성돼 녹음
+      // 배지가 화면 밖으로 잘려 나갔다. 화면 폭(물리 픽셀) 안에 넉넉히
+      // 들어가는 raw 픽셀 값을 바로 넘긴다.
       await FlutterOverlayWindow.showOverlay(
         height: 140,
-        width: 460,
+        width: 700,
         alignment: OverlayAlignment.centerRight,
         flag: OverlayFlag.defaultFlag,
         enableDrag: true,
@@ -188,22 +193,26 @@ class RealAssistantController
   Future<Set<ReadinessItem>> checkReadiness() async {
     final missing = <ReadinessItem>{};
 
-    if (!await AudioRecorder().hasPermission(request: false)) {
-      missing.add(ReadinessItem.microphone);
-    }
+    final mic = await AudioRecorder().hasPermission(request: false);
+    if (!mic) missing.add(ReadinessItem.microphone);
+
     // record 패키지는 카메라 권한을 안 다뤄서 permission_handler로 따로 본다.
     // 이게 빠져 있던 탓에 "시작"에서 카메라 권한이 한 번도 요청되지 않았었다.
-    if (!await ph.Permission.camera.status.isGranted) {
-      missing.add(ReadinessItem.camera);
-    }
-    if (!await FlutterOverlayWindow.isPermissionGranted()) {
-      missing.add(ReadinessItem.overlay);
-    }
+    final camera = await ph.Permission.camera.status.isGranted;
+    if (!camera) missing.add(ReadinessItem.camera);
+
+    final overlay = await FlutterOverlayWindow.isPermissionGranted();
+    if (!overlay) missing.add(ReadinessItem.overlay);
+
     // 삼성 One UI는 배터리 절약으로 백그라운드 서비스를 죽인다. 예외로 빼지
     // 않으면 캡슐이 현장에서 조용히 사라진다.
-    if (!await FlutterForegroundTask.isIgnoringBatteryOptimizations) {
-      missing.add(ReadinessItem.battery);
-    }
+    final battery = await FlutterForegroundTask.isIgnoringBatteryOptimizations;
+    if (!battery) missing.add(ReadinessItem.battery);
+
+    // 진단용 — "권한 허용해도 시작 안 됨" 원인 조사. 어느 항목이 false로
+    // 잡히는지가 핵심 증거라 Phase 4에서 지운다.
+    debugPrint('[RAPID] checkReadiness: mic=$mic camera=$camera '
+        'overlay=$overlay battery=$battery');
     return missing;
   }
 
@@ -256,6 +265,12 @@ class RealAssistantController
     // 스펙 02절 — 시작하면 앱은 물러나고 119 화면이 다시 전면에 온다.
     // 캡슐은 여기서 직접 띄우지 않는다. 앱이 물러나는 순간 생명주기 관찰이
     // 띄워 주므로, 그 한 경로로만 관리해 중복·누락을 없앤다.
+    //
+    // 서비스 시작 직후 곧바로 최소화하면(특히 안드로이드16 삼성 기기) 런처의
+    // 최근앱 갱신과 겹쳐 태스크가 "제거"로 처리되어 stopWithTask 때문에 방금
+    // 켠 서비스가 같이 죽는 게 S25에서 확인됐다. 서비스 등록이 완전히
+    // 끝난 뒤로 최소화를 미뤄 그 경합을 피한다.
+    await Future.delayed(const Duration(milliseconds: 400));
     FlutterForegroundTask.minimizeApp();
   }
 

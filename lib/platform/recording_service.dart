@@ -239,6 +239,7 @@ class RecordingTaskHandler extends TaskHandler {
       final result = await _api!.analyze(
         audio: audio,
         photos: _photoPaths.map(File.new).where((f) => f.existsSync()).toList(),
+        durationSeconds: _elapsed,
       );
       if (generation != _analysisGeneration) return;
       _analyzing = false;

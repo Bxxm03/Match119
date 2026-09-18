@@ -13,7 +13,16 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+
+# 파일럿 웹 페이지. /api/analyze를 상대경로로 부르길래 같은 서버에서
+# 같이 서빙해 별도 서버·터널 없이 지금 백엔드 터널 그대로 쓴다.
+PILOT_WEB_INDEX = Path(r"C:\Users\82105\Desktop\학교\구글캡스톤\web\index.html")
+
+# 이보다 짧은 녹음은 Gemini를 부르지 않는다 — 대화라 부를 만한 게 담기기엔
+# 너무 짧아서, 모델이 애매한 잡음을 그럴듯한 응급상황으로 지어내는 원인이었다.
+MIN_AUDIO_SECONDS = 2
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -24,6 +33,11 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 app = FastAPI()
+
+
+@app.get("/")
+async def pilot_web():
+    return FileResponse(PILOT_WEB_INDEX)
 
 
 @app.get("/api/health")
@@ -47,7 +61,21 @@ SCHEMA_PROMPT = """다음 오디오는 구급대원과 환자(또는 보호자) 
   "reasons": ["근거1 — 평이한 관찰언어로만, 의학용어·진단명 쓰지 않음", "근거2"]
 }
 
-대화에서 확인할 수 없는 필드는 빈 문자열로 남겨라."""
+대화에서 확인할 수 없는 필드는 빈 문자열로 남겨라.
+오디오가 너무 짧거나, 잡음뿐이거나, 실제 대화 내용을 알아들을 수 없으면
+절대로 그럴듯한 상황을 지어내지 마라 — 그런 경우 모든 필드를 빈 문자열(reasons는
+빈 배열)로 남겨라."""
+
+EMPTY_RESULT = {
+    "chief_complaint": "",
+    "past_history": "",
+    "onset": "",
+    "last_normal_time": "",
+    "guardian": "",
+    "etc": "",
+    "ai_impression": "",
+    "reasons": [],
+}
 
 
 def _audio_mime(filename: str | None, content_type: str | None) -> str:
@@ -145,9 +173,17 @@ def strip_code_fence(text: str) -> str:
 
 
 @app.post("/api/analyze")
-async def analyze(audio: UploadFile = File(...), photo: list[UploadFile] = File(default=[])):
+async def analyze(
+    audio: UploadFile = File(...),
+    photo: list[UploadFile] = File(default=[]),
+    duration_seconds: int = Form(0),
+):
     if not GEMINI_API_KEY:
         raise HTTPException(500, "backend/.env 에 GEMINI_API_KEY가 없음")
+
+    if duration_seconds and duration_seconds < MIN_AUDIO_SECONDS:
+        print(f"[analyze] 녹음 {duration_seconds}초 — 너무 짧아 Gemini 호출 생략")
+        return EMPTY_RESULT
 
     parts = [{"text": SCHEMA_PROMPT}]
 
@@ -184,7 +220,15 @@ async def analyze(audio: UploadFile = File(...), photo: list[UploadFile] = File(
                     res = await client.post(
                         GEMINI_URL,
                         params={"key": GEMINI_API_KEY},
-                        json={"contents": [{"parts": parts}]},
+                        json={
+                            "contents": [{"parts": parts}],
+                            # 대화 듣고 정해진 스키마 채우는 작업이라 추론이 필요 없다.
+                            # thinking을 켜 두면 매 호출마다 그 오버헤드가 그대로
+                            # 응답 지연으로 붙는다 — 현장에서는 속도가 더 중요하다.
+                            "generationConfig": {
+                                "thinkingConfig": {"thinkingBudget": 0}
+                            },
+                        },
                     )
                 except httpx.TimeoutException:
                     # 502/504는 Cloudflare 터널이 자체 에러 페이지로 덮어써서 클라이언트에 원인이 안 보임 — 400 사용
