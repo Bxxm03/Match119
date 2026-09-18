@@ -1,17 +1,5 @@
-# rapid_app
+# Match119 (RAPID)
 
-A new Flutter project.
+구급대원용 환자정보 자동입력 어시스턴트 — 대화·사진을 듣고 보고 구조화된 환자 기록을 만들어, 기존 119 시스템 화면 위 캡슐 형태로 제공한다.
 
-## Getting Started
-
-This project is a starting point for a Flutter application.
-
-A few resources to get you started if this is your first Flutter project:
-
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+Google x 아주대 AI융합캡스톤 프로젝트.
