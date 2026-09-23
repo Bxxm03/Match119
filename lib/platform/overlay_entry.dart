@@ -56,6 +56,7 @@ class _CapsuleHost extends StatefulWidget {
 class _CapsuleHostState extends State<_CapsuleHost> {
   bool _recording = false;
   int _elapsed = 0;
+  bool _resultPending = false;
 
   @override
   void initState() {
@@ -65,6 +66,7 @@ class _CapsuleHostState extends State<_CapsuleHost> {
       setState(() {
         _recording = data[kRecording] == true;
         _elapsed = (data[kElapsedSec] as num?)?.toInt() ?? 0;
+        _resultPending = data[kResult] != null;
       });
     });
   }
@@ -76,6 +78,7 @@ class _CapsuleHostState extends State<_CapsuleHost> {
       child: Capsule(
         recording: _recording,
         recordedSeconds: _elapsed,
+        resultPending: _resultPending,
         // 캡슐은 명령만 보낸다. 실제 녹음은 서비스가 한다.
         onMicTap: () => FlutterOverlayWindow.shareData(cmd(kCmdToggleRecord)),
         onExpandTap: () => FlutterOverlayWindow.shareData(cmd(kCmdExpand)),

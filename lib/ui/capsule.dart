@@ -16,12 +16,18 @@ class Capsule extends StatelessWidget {
     super.key,
     required this.recording,
     required this.recordedSeconds,
+    required this.resultPending,
     required this.onMicTap,
     required this.onExpandTap,
   });
 
   final bool recording;
   final int recordedSeconds;
+
+  /// 직전 케이스 결과가 아직 남아있는 상태(복사 전이든 후든). 이 상태에서
+  /// 마이크를 누르면 toggleRecording()이 그 결과를 지우고 새로 시작하므로,
+  /// 마이크 대신 새로고침 아이콘으로 "눌러서 새 케이스" 신호를 준다.
+  final bool resultPending;
   final VoidCallback onMicTap;
   final VoidCallback onExpandTap;
 
@@ -50,10 +56,23 @@ class Capsule extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               _CapsuleHalf(
-                icon: recording ? Icons.stop_rounded : Icons.mic_rounded,
+                icon: recording
+                    ? Icons.stop_rounded
+                    : resultPending
+                        ? Icons.refresh_rounded
+                        : Icons.mic_rounded,
                 // 스펙 10-1: 녹음 중 = siren. "지금 주목" 신호.
-                color: recording ? RapidColors.siren : RapidColors.paper,
-                tooltip: recording ? '녹음 정지' : '녹음 시작',
+                // 결과 대기 중 = amber. 눌러야 새 케이스로 넘어간다는 강조.
+                color: recording
+                    ? RapidColors.siren
+                    : resultPending
+                        ? RapidColors.amber
+                        : RapidColors.paper,
+                tooltip: recording
+                    ? '녹음 정지'
+                    : resultPending
+                        ? '새 케이스 시작'
+                        : '녹음 시작',
                 onTap: onMicTap,
                 borderRadius: const BorderRadius.horizontal(
                   left: Radius.circular(RapidRadius.capsule),

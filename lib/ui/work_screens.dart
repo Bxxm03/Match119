@@ -108,6 +108,7 @@ class _CollapsedView extends StatelessWidget {
                     child: Capsule(
                       recording: state.recording,
                       recordedSeconds: state.recordedSeconds,
+                      resultPending: state.result != null,
                       onMicTap: onMicTap,
                       onExpandTap: onExpandTap,
                     ),
