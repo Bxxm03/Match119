@@ -15,11 +15,6 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
-
-# 파일럿 웹 페이지. /api/analyze를 상대경로로 부르길래 같은 서버에서
-# 같이 서빙해 별도 서버·터널 없이 지금 백엔드 터널 그대로 쓴다.
-PILOT_WEB_INDEX = Path(r"C:\Users\82105\Desktop\학교\구글캡스톤\web\index.html")
 
 # 이보다 짧은 녹음은 Gemini를 부르지 않는다 — 대화라 부를 만한 게 담기기엔
 # 너무 짧아서, 모델이 애매한 잡음을 그럴듯한 응급상황으로 지어내는 원인이었다.
@@ -34,11 +29,6 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 app = FastAPI()
-
-
-@app.get("/")
-async def pilot_web():
-    return FileResponse(PILOT_WEB_INDEX)
 
 
 @app.get("/api/health")
