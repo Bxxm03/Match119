@@ -32,7 +32,7 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 | 항목 | 값 |
 |---|---|
 | 프로젝트 ID | `match119-504015` (같은 이름의 `match119`는 사용하지 않음) |
-| 리전 | `asia-northeast3` (서울) — 버킷·Firestore·Cloud Run 모두 동일 |
+| 리전 | `asia-northeast3` (서울) — 버킷·Firestore·Cloud Run 모두 동일. Vertex AI 호출 리전은 별도 값(`VERTEX_LOCATION`)이며 현재도 `asia-northeast3` — 아래 "Vertex AI 모델" 참고 |
 | 버킷 | `rapid-temp-uploads-match119` (공개 차단, 균일 액세스, 1일 경과 자동 삭제) |
 | 런타임 서비스 계정 | `rapid-backend@match119-504015.iam.gserviceaccount.com` |
 | 서비스 계정 권한 | 버킷 `storage.objectAdmin`, `datastore.user`, `aiplatform.user`, 자기 자신 `iam.serviceAccountTokenCreator` |
@@ -41,10 +41,38 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 - Cloud Run에는 서명용 개인키가 없다. Signed URL은 IAM signBlob 방식
   (`service_account_email` + `access_token` 전달)으로 서명한다.
 
+## Vertex AI 모델
+
+| 항목 | 값 |
+|---|---|
+| 사용 모델 | `gemini-2.5-flash` (GA) |
+| Vertex 호출 리전 | `asia-northeast3` (서울) |
+| 모델 종료(retirement) 예정일 | **2026-10-20** |
+
+- 서울 리전에서 오디오+이미지 실호출까지 검증된 유일한 GA Flash 모델이라 선택했다.
+  대회 일정(~2026-10-07)이 종료일보다 앞서 지금은 문제없지만,
+  **10/7 이후에도 시연이 필요하면 종료일(2026-10-20) 전에 반드시 아래 비상 대안으로 전환한다.**
+
+### 비상 대안 (서울 리전이 막히거나 10/20 이후 사용해야 할 때)
+
+- `gemini-3.5-flash` + `asia-northeast1`(도쿄) — 실호출 검증 완료, 종료일 2027-05-19 이후.
+- 전환 시 발표 문구를 "AI 추론은 도쿄(asia-northeast1) 리전"으로 고친다.
+- **`global` 엔드포인트는 사용 금지.** 처리 리전을 보장하지 않아 "특정 리전에서 처리한다"고 말할 수 없게 된다.
+
+### 모델 호출 시 주의사항 (검증 중 발견)
+
+- `thinkingConfig.thinkingBudget: 0`을 유지한다. thinking을 켜 두면 `maxOutputTokens`가 thinking에
+  먼저 소모되어 `finishReason: MAX_TOKENS`로 빈 응답이 나올 수 있다 — `maxOutputTokens`는 응답 스키마
+  전체가 들어갈 만큼 넉넉히 잡을 것.
+- 0.1초짜리 무음 오디오를 넣어도 모델이 소리를 지어냈다(모델마다 다른 내용). `MIN_AUDIO_SECONDS`
+  가드는 모델을 바꿔도 반드시 유지한다.
+
 ## 백엔드 (`backend/`)
 
 - Python **3.13** (Dockerfile도 `python:3.13-slim`). 팀원 모두 3.13.x 사용.
-- 설정값은 코드에 박지 않고 환경변수로 받는다: `PROJECT_ID`, `REGION`, `BUCKET`, `MODEL`.
+- 설정값은 코드에 박지 않고 환경변수로 받는다: `PROJECT_ID`, `REGION`(버킷·Firestore·Cloud Run 리전),
+  `BUCKET`, `MODEL`, `VERTEX_LOCATION`(Vertex AI 호출 리전 — `REGION`과 분리해서, 비상 전환 시 코드
+  수정 없이 `VERTEX_LOCATION`과 `MODEL`만 바꿔 재배포할 수 있게 한다).
 - 로컬 경로(`C:\Users\...` 등)를 코드에 하드코딩하지 않는다 — 컨테이너에서 깨진다.
 - Vertex 모델은 **모델 ID를 명시**한다. `gemini-flash-latest` 같은 별칭은 Developer API 전용이라 Vertex에서 쓰지 않는다.
 
@@ -64,7 +92,7 @@ uvicorn main:app --reload --port 8000
 ```
 gcloud run deploy rapid-backend --source backend/ --region asia-northeast3 ^
   --service-account=rapid-backend@match119-504015.iam.gserviceaccount.com ^
-  --set-env-vars=PROJECT_ID=match119-504015,REGION=asia-northeast3,BUCKET=rapid-temp-uploads-match119,MODEL=<모델ID>
+  --set-env-vars=PROJECT_ID=match119-504015,REGION=asia-northeast3,BUCKET=rapid-temp-uploads-match119,MODEL=gemini-2.5-flash,VERTEX_LOCATION=asia-northeast3
 ```
 
 - `--service-account`를 빼먹으면 권한이 넓은 기본 계정으로 돈다. 반드시 지정.
