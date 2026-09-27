@@ -8,6 +8,8 @@
 
 ## 목표 아키텍처 (현재 이 구조로 전환 중)
 
+자세한 설계 배경(각 구성 요소를 쓰는 이유)은 `docs/architecture.md`, 흐름도는 `docs/sequence-diagram.jpg` 참고.
+
 ```
 Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
           ◀── Signed URL ──────────
