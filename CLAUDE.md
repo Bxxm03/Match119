@@ -24,8 +24,8 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 
 - 범위: 위 클라우드 파이프라인까지. 온디바이스(Gemini Nano)는 현재 범위 밖이며,
   동의 거부 분기는 "준비 중" 상태로 둔다.
-- 현재 `backend/main.py`는 PoC 상태(Gemini Developer API 키 + Files API, multipart 업로드).
-  위 구조로 교체하는 것이 진행 중인 작업이다.
+- `backend/`는 위 구조로 교체됨(`feature/vertex-backend`). 앱(`lib/data/analysis_api.dart`)은 아직
+  구 multipart 방식이라 새 흐름으로 바꾸는 작업이 남아 있다 — `docs/progress.md` 참고.
 
 ## GCP 리소스
 
@@ -40,6 +40,8 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 - 서비스 계정 키(JSON)는 만들지도, 공유하지도 않는다. 로컬은 각자 `gcloud auth application-default login`.
 - Cloud Run에는 서명용 개인키가 없다. Signed URL은 IAM signBlob 방식
   (`service_account_email` + `access_token` 전달)으로 서명한다.
+- 로컬에서 `/api/uploads`를 쓰려면 **본인 계정**에도 `rapid-backend` 서비스 계정에 대한
+  `iam.serviceAccountTokenCreator`가 있어야 한다(없으면 서명 단계에서 403).
 
 ## Vertex AI 모델
 
@@ -70,9 +72,23 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 ## 백엔드 (`backend/`)
 
 - Python **3.13** (Dockerfile도 `python:3.13-slim`). 팀원 모두 3.13.x 사용.
-- 설정값은 코드에 박지 않고 환경변수로 받는다: `PROJECT_ID`, `REGION`(버킷·Firestore·Cloud Run 리전),
-  `BUCKET`, `MODEL`, `VERTEX_LOCATION`(Vertex AI 호출 리전 — `REGION`과 분리해서, 비상 전환 시 코드
-  수정 없이 `VERTEX_LOCATION`과 `MODEL`만 바꿔 재배포할 수 있게 한다).
+- 설정값은 코드에 박지 않고 환경변수로 받는다. 필수값이 빠지면 서버가 기동하지 않는다.
+
+| 변수 | 필수 | 예 / 설명 |
+|---|---|---|
+| `PROJECT_ID` | ✔ | `match119-504015` |
+| `REGION` | ✔ | `asia-northeast3` — 버킷·Firestore·Cloud Run 리전 |
+| `BUCKET` | ✔ | `rapid-temp-uploads-match119` |
+| `MODEL` | ✔ | `gemini-2.5-flash` — 별칭 금지, 모델 ID 그대로 |
+| `VERTEX_LOCATION` | ✔ | `asia-northeast3` — Vertex AI 호출 리전. `REGION`과 분리해서, 비상 전환 시 코드 수정 없이 `VERTEX_LOCATION`과 `MODEL`만 바꿔 재배포한다. `global`이면 기동 거부 |
+| `APP_TOKEN` | ✔ | 앱과 공유하는 토큰(`X-RAPID-Token` 헤더). **무단 호출 방지용 최소 보호**이지 보안 인증이 아니다(APK에서 추출 가능). 커밋 금지 |
+| `SIGNER_EMAIL` | 로컬만 | `rapid-backend@match119-504015.iam.gserviceaccount.com` — 로컬 ADC(사용자 계정)에서 Signed URL 서명 주체. Cloud Run에서는 비워 둔다(런타임 서비스 계정 자동 사용) |
+
+- 로컬은 `backend/.env`에 위 값을 넣는다(`.gitignore`·`.dockerignore`에 제외돼 있음).
+- 프롬프트는 Firestore `prompts/current`(`template`, `version`)에서 읽는다. 서버가 1분간 캐시하므로
+  수정은 "즉시"가 아니라 **캐시 TTL(1분) 내 반영**된다. 문서가 없거나 못 읽으면 `backend/prompts.py`의
+  내장 기본 프롬프트(`version=builtin`)를 쓴다. 기본 프롬프트 업로드: `python seed_prompt.py <버전>`.
+- 응답 스키마(8필드)는 앱 파싱과 맞물린 계약이라 코드(`backend/prompts.py`)가 소유한다.
 - 로컬 경로(`C:\Users\...` 등)를 코드에 하드코딩하지 않는다 — 컨테이너에서 깨진다.
 - Vertex 모델은 **모델 ID를 명시**한다. `gemini-flash-latest` 같은 별칭은 Developer API 전용이라 Vertex에서 쓰지 않는다.
 
@@ -92,10 +108,14 @@ uvicorn main:app --reload --port 8000
 ```
 gcloud run deploy rapid-backend --source backend/ --region asia-northeast3 ^
   --service-account=rapid-backend@match119-504015.iam.gserviceaccount.com ^
-  --set-env-vars=PROJECT_ID=match119-504015,REGION=asia-northeast3,BUCKET=rapid-temp-uploads-match119,MODEL=gemini-2.5-flash,VERTEX_LOCATION=asia-northeast3
+  --allow-unauthenticated ^
+  --set-env-vars=PROJECT_ID=match119-504015,REGION=asia-northeast3,BUCKET=rapid-temp-uploads-match119,MODEL=gemini-2.5-flash,VERTEX_LOCATION=asia-northeast3,APP_TOKEN=<공유토큰>
 ```
 
 - `--service-account`를 빼먹으면 권한이 넓은 기본 계정으로 돈다. 반드시 지정.
+- `--allow-unauthenticated`는 앱이 IAM 인증 없이 부르기 때문에 필요하다. 대신 `/api/uploads`·`/api/analyze`는
+  `APP_TOKEN` 공유 토큰(무단 호출 방지용 최소 보호)으로 막는다. `/api/health`만 토큰 없이 열려 있다.
+- `APP_TOKEN` 실제 값은 배포 명령·문서에 적어 커밋하지 않는다. `SIGNER_EMAIL`은 Cloud Run에 넣지 않는다.
 - `min-instances=1`은 시연 당일에만 켠다(무료 한도 소모).
 
 ### 반드시 유지할 기존 안전장치 (PoC에서 실제 문제를 겪고 넣은 것)
@@ -116,6 +136,7 @@ gcloud run deploy rapid-backend --source backend/ --region asia-northeast3 ^
 
 - UI는 유지. 서버 통신은 `lib/data/analysis_api.dart`에서만 한다.
 - 백엔드 주소는 `--dart-define=RAPID_API=<주소>` (기본값 `http://127.0.0.1:8000`, USB + `adb reverse tcp:8000 tcp:8000`)
+- 공유 토큰은 `--dart-define=RAPID_TOKEN=<APP_TOKEN과 같은 값>` (앱 반영은 예정 — `docs/progress.md`)
 - 화면만 볼 때: `--dart-define=RAPID_FAKE=true`
 
 ## 용어·표현 규칙 (코드 주석, UI 문구, 문서 모두 적용)
@@ -127,6 +148,8 @@ gcloud run deploy rapid-backend --source backend/ --region asia-northeast3 ^
   예: resumable 업로드를 구현하기 전에는 "이어올리기"를 완료형으로 쓰지 않는다.
   예: GCS 수명 주기 규칙은 "즉시"가 아니라 "누락 대비 1일 경과 후 자동 파기"다.
 - 우리의 GCS 원본 삭제와 Google 측 ZDR 설정은 다른 개념이다. 발표에서는 "원본 즉시 삭제"로 표현.
+- 공유 토큰(`APP_TOKEN`)은 "보안 인증"이 아니라 **"무단 호출 방지용 최소 보호"**로 쓴다.
+- Firestore 프롬프트 수정은 "즉시 반영"이 아니라 **"캐시 TTL(1분) 내 반영"**으로 쓴다.
 
 ## Git 규칙
 
