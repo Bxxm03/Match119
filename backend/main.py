@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import hmac
 import json
 import os
@@ -18,15 +17,26 @@ from zoneinfo import ZoneInfo
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import google.auth
-import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, Header, HTTPException
+from google import genai
+from google.api_core.exceptions import NotFound
 from google.auth.transport.requests import Request
-from google.cloud import storage
+from google.cloud import firestore, storage
+from google.genai import errors as genai_errors
+from google.genai import types
 from pydantic import BaseModel
+
+from prompts import (
+    DEFAULT_PROMPT_TEMPLATE,
+    DEFAULT_PROMPT_VERSION,
+    EMPTY_RESULT,
+    RESPONSE_SCHEMA,
+)
 
 # 이보다 짧은 녹음은 Gemini를 부르지 않는다 — 대화라 부를 만한 게 담기기엔
 # 너무 짧아서, 모델이 애매한 잡음을 그럴듯한 응급상황으로 지어내는 원인이었다.
+# 0.1초 무음도 모델이 소리를 지어냈으므로 모델을 바꿔도 이 가드는 유지한다.
 MIN_AUDIO_SECONDS = 2
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -68,9 +78,37 @@ MAX_AUDIO_BYTES = 50 * 1024 * 1024
 MAX_PHOTO_BYTES = 10 * 1024 * 1024
 SIGNED_URL_TTL = timedelta(minutes=10)
 SESSION_ID = re.compile(r"[0-9a-f]{32}")
+AUDIO_NAME = re.compile(r"audio\.(m4a|wav)")
+PHOTO_NAME = re.compile(r"photo-[0-2]\.(jpg|png)")
+
+# 앱 타임아웃(90초)보다 짧게 두어, 서버가 먼저 이유 있는 에러를 만들게 한다.
+# 재시도까지 포함한 전체 한도다 — 시도마다 75초를 주면 최악 225초가 된다.
+VERTEX_DEADLINE_SECONDS = 75
+MAX_RETRIES = 2  # 503(과부하)는 흔히 발생 — 최대 2회 재시도
+RETRY_DELAY_SECONDS = 1.5
+
+# 프롬프트 수정은 캐시 TTL(1분) 내 반영된다.
+PROMPT_CACHE_SECONDS = 60
+
+GENERATION_CONFIG = types.GenerateContentConfig(
+    # 온도를 낮춰서 대화에 없는 내용을 그럴듯하게 채워 넣는 것(hallucination)을
+    # 최대한 억제한다 — 이 작업은 창의성이 아니라 정확한 인용이 목적이다.
+    temperature=0,
+    # 대화 듣고 정해진 스키마 채우는 작업이라 추론이 필요 없다. thinking을 켜 두면
+    # max_output_tokens가 thinking에 먼저 소모되어 MAX_TOKENS로 빈 응답이 나올 수 있다.
+    thinking_config=types.ThinkingConfig(thinking_budget=0),
+    response_mime_type="application/json",
+    response_schema=RESPONSE_SCHEMA,
+    # 8필드 한국어 + reasons 배열이 여유 있게 들어가는 크기.
+    max_output_tokens=4096,
+    # 도구 호출을 쓰지 않는다.
+    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+)
 
 storage_client = storage.Client(project=PROJECT_ID)
 bucket = storage_client.bucket(BUCKET)
+firestore_client = firestore.AsyncClient(project=PROJECT_ID)
+genai_client = genai.Client(vertexai=True, project=PROJECT_ID, location=VERTEX_LOCATION)
 
 # Cloud Run에는 서명용 개인키가 없다. ADC 액세스 토큰으로 IAM signBlob을 불러
 # 서명한다(서비스 계정이 자기 자신에 대해 serviceAccountTokenCreator 필요).
@@ -78,6 +116,18 @@ _credentials, _ = google.auth.default(
     scopes=["https://www.googleapis.com/auth/cloud-platform"]
 )
 _credentials_lock = threading.Lock()
+
+app = FastAPI()
+
+
+class AnalysisFailed(Exception):
+    """분석 실패 — 앱에 돌려줄 코드·문구와 메타데이터용 분류를 함께 담는다."""
+
+    def __init__(self, status: int, detail: str, error_type: str):
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+        self.error_type = error_type
 
 
 def _signing_identity() -> tuple[str, str]:
@@ -120,19 +170,11 @@ def require_app_token(x_rapid_token: str = Header(default="")) -> None:
     if not hmac.compare_digest(x_rapid_token.encode(), APP_TOKEN.encode()):
         raise HTTPException(401, "인증 실패")
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-# 별칭을 기본값으로 둔다. 특정 버전을 박아 두면 그 모델이 내려갈 때 404로 죽는다
-# (파일럿에서 gemini-2.5-flash가 그렇게 죽었다).
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-
-app = FastAPI()
-
 
 @app.get("/api/health")
 async def health():
-    """앱이 백엔드를 찾았는지 확인하는 용도. 키 값은 노출하지 않는다."""
-    return {"ok": True, "model": GEMINI_MODEL, "key_configured": bool(GEMINI_API_KEY)}
+    """앱이 백엔드를 찾았는지 확인하는 용도. 비밀값은 노출하지 않는다."""
+    return {"ok": True, "model": MODEL, "vertex_location": VERTEX_LOCATION}
 
 
 class UploadRequest(BaseModel):
@@ -189,248 +231,258 @@ async def create_uploads(req: UploadRequest):
         **urls,
     }
 
-# 대화 원문 표현 + 의학용어 병기(기본 필드) / ai_impression은 질환군명 수준까지만 / reasons는 평이한 관찰언어
-# — EMS_기획안_v2.md 03번 섹션 스키마·원칙 그대로.
-#
-# onset/last_normal_time은 "20분 전"처럼 상대시간으로 말하는 게 보통이라, 대원이
-# 그걸 다시 시계로 환산하는 수고를 없애려고 서버 현재 시각을 프롬프트에 박아
-# 넣고 모델이 직접 절대시각으로 계산하게 한다(요청 시점마다 새로 만들어야
-# 해서 함수로 뺐다 — 모듈 로드 시 한 번만 박히는 상수면 안 된다).
-def build_schema_prompt() -> str:
-    now = datetime.now().strftime("%H:%M")
-    return f"""다음 오디오는 구급대원과 환자(또는 보호자) 간 실제 대화 녹음이다. 사진이 함께 제공되면 시각적 소견도 참고하라.
-현재 서버 시각은 {now}이다.
-아래 JSON 스키마 형식으로만 응답하라 (설명 문장, 코드블록 없이 JSON 객체만):
 
-{{
-  "chief_complaint": "주증상 — 대화 원문 표현에 의학용어를 괄호로 병기",
-  "past_history": "과거력(다니는 병원 포함)",
-  "onset": "발병시점 — 대화에 '20분 전'처럼 상대시간으로 나오면 '원래 표현(계산된 절대시각 HH:MM)' 형식으로 적어라(예: 현재 14:52, '20분 전' → '20분전(14:32)'). 처음부터 시각으로 말했으면 그 시각만 적어라.",
-  "last_normal_time": "마지막 정상확인시간 — onset과 같은 표기 방식(원래 표현+절대시각). onset과 별개로 대화에서 명시적으로 언급된 경우에만 채워라 — 대화에 따로 나온 게 없으면 onset과 같은 값을 넣지 말고 빈 문자열로 남겨라.",
-  "guardian": "보호자 동승 여부",
-  "etc": "기타 특이사항 — 외상이면 다친 경위(어디서/어떻게 다쳤는지)를 포함",
-  "ai_impression": "의심 소견 — 대원이 현장에서 쓰는 질환군명 수준까지만, 세부 임상분류 제외. 확정 진단 아님",
-  "reasons": ["근거1 — 평이한 관찰언어로만, 의학용어·진단명 쓰지 않음", "근거2"]
-}}
-
-각 필드는 대화에서 그 내용이 직접 언급된 경우에만 채워라. 필드별로 독립적으로
-판단하라 — 예를 들어 주증상은 나왔지만 발병시점은 안 나왔으면, 주증상만 채우고
-발병시점은 빈 문자열로 남겨라. 다른 필드에 내용이 있다고 해서, 또는 그럴듯해
-보인다고 해서 언급되지 않은 필드를 추측해서 채우지 마라.
-오디오가 너무 짧거나, 잡음뿐이거나, 실제 대화 내용을 알아들을 수 없으면
-절대로 그럴듯한 상황을 지어내지 마라 — 그런 경우 모든 필드를 빈 문자열(reasons는
-빈 배열)로 남겨라."""
-
-EMPTY_RESULT = {
-    "chief_complaint": "",
-    "past_history": "",
-    "onset": "",
-    "last_normal_time": "",
-    "guardian": "",
-    "etc": "",
-    "ai_impression": "",
-    "reasons": [],
-}
+_prompt_cache: tuple[float, str, str] | None = None
 
 
-def _audio_mime(filename: str | None, content_type: str | None) -> str:
-    """Gemini가 디코딩할 수 있는 오디오 MIME을 고른다.
+async def _load_prompt() -> tuple[str, str]:
+    """Firestore prompts/current에서 (템플릿, 버전)을 읽는다. 1분간 캐시한다.
 
-    Flutter의 MultipartFile은 content-type을 지정하지 않으면
-    application/octet-stream을 보낸다. 그대로 넘기면 Gemini가 무엇인지 몰라
-    처리하지 못하므로, 확장자로 실제 타입을 정한다.
+    Firestore를 못 읽어도 분석 자체가 멈추면 안 되므로 내장 기본 프롬프트로
+    대신하고 버전을 "builtin"으로 남긴다.
     """
-    if content_type and content_type.startswith("audio/"):
-        return content_type
+    global _prompt_cache
+    now = time.monotonic()
+    if _prompt_cache and now - _prompt_cache[0] < PROMPT_CACHE_SECONDS:
+        return _prompt_cache[1], _prompt_cache[2]
 
-    ext = Path(filename or "").suffix.lower()
-    return {
-        ".m4a": "audio/mp4",
-        ".mp4": "audio/mp4",
-        ".aac": "audio/aac",
-        ".wav": "audio/wav",
-        ".mp3": "audio/mpeg",
-        ".ogg": "audio/ogg",
-        ".opus": "audio/ogg",
-        ".webm": "audio/webm",
-        ".flac": "audio/flac",
-    }.get(ext, "audio/mp4")
-
-
-async def upload_file(
-    client: httpx.AsyncClient, data: bytes, mime: str, display_name: str
-) -> str:
-    """Files API에 올리고 참조용 URI를 돌려준다."""
-    start = await client.post(
-        f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={GEMINI_API_KEY}",
-        headers={
-            "X-Goog-Upload-Protocol": "resumable",
-            "X-Goog-Upload-Command": "start",
-            "X-Goog-Upload-Header-Content-Length": str(len(data)),
-            "X-Goog-Upload-Header-Content-Type": mime,
-            "Content-Type": "application/json",
-        },
-        json={"file": {"display_name": display_name}},
-    )
-    if start.status_code != 200:
-        raise HTTPException(400, f"파일 업로드 시작 실패({start.status_code}): {start.text}")
-
-    upload_url = start.headers.get("x-goog-upload-url")
-    if not upload_url:
-        raise HTTPException(400, "파일 업로드 URL을 받지 못했습니다")
-
-    done = await client.post(
-        upload_url,
-        headers={
-            "Content-Length": str(len(data)),
-            "X-Goog-Upload-Offset": "0",
-            "X-Goog-Upload-Command": "upload, finalize",
-        },
-        content=data,
-    )
-    if done.status_code != 200:
-        raise HTTPException(400, f"파일 업로드 실패({done.status_code}): {done.text}")
-
-    uri = done.json().get("file", {}).get("uri")
-    if not uri:
-        raise HTTPException(400, "업로드된 파일 URI를 받지 못했습니다")
-    print(f"[analyze] uploaded -> {uri}")
-    return uri
-
-
-async def delete_uploaded_file(client: httpx.AsyncClient, file_uri: str) -> None:
-    """분석이 끝나면 Files API에 올려둔 사본을 지운다.
-
-    Gemini 유료 티어는 프롬프트·응답을 학습에 안 쓰지만(Zero Data Retention),
-    Files API로 올린 파일은 예외다 — 사용자가 직접 지워야 완전한 ZDR이 된다
-    (https://ai.google.dev/gemini-api/docs/zdr). 지우지 않으면 환자 음성이
-    구글 쪽에 기본 48시간 남는다. 분석 성공·실패와 무관하게 항상 호출한다.
-    """
-    name = file_uri.rsplit("/files/", 1)[-1]
+    template, version = DEFAULT_PROMPT_TEMPLATE, DEFAULT_PROMPT_VERSION
     try:
-        res = await client.delete(
-            f"https://generativelanguage.googleapis.com/v1beta/files/{name}",
-            params={"key": GEMINI_API_KEY},
-        )
-        if res.status_code == 200:
-            print(f"[analyze] 파일 삭제됨 -> {file_uri}")
+        snap = await firestore_client.collection("prompts").document("current").get(timeout=5)
+        data = snap.to_dict() if snap.exists else None
+        if data and data.get("template"):
+            template = data["template"]
+            version = str(data.get("version", "unknown"))
         else:
-            print(f"[analyze] 파일 삭제 실패({res.status_code}): {res.text}")
-    except httpx.HTTPError as e:
-        # 삭제 실패로 분석 자체를 실패시키지는 않는다 — 이미 대원에게 결과를
-        # 주는 게 우선이다. 대신 로그에 남겨 놓쳤을 때 추적할 수 있게 한다.
-        print(f"[analyze] 파일 삭제 중 오류: {e}")
+            print("[prompt] 경고: prompts/current 문서가 없어 내장 기본 프롬프트를 쓴다")
+    except Exception as e:
+        print(f"[prompt] 경고: Firestore 조회 실패, 내장 기본 프롬프트를 쓴다: {e!r}")
+
+    _prompt_cache = (now, template, version)
+    return template, version
 
 
-def strip_code_fence(text: str) -> str:
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    return match.group(0) if match else text
+def _validated_names(req: "AnalyzeRequest") -> tuple[str, list[str]]:
+    """요청의 객체 이름이 이 세션에 서버가 발급한 형식인지 확인한다.
+
+    다른 세션의 객체나 임의 경로를 모델에 넘기지 못하게 한다.
+    """
+    prefix = f"sessions/{req.session_id}/"
+
+    def ok(name: str, pattern: re.Pattern) -> bool:
+        return name.startswith(prefix) and bool(pattern.fullmatch(name[len(prefix):]))
+
+    if not ok(req.audio_object, AUDIO_NAME):
+        raise AnalysisFailed(400, "잘못된 객체 이름", "bad_request")
+    if len(req.photo_objects) > MAX_PHOTOS or len(set(req.photo_objects)) != len(req.photo_objects):
+        raise AnalysisFailed(400, "잘못된 객체 이름", "bad_request")
+    if not all(ok(name, PHOTO_NAME) for name in req.photo_objects):
+        raise AnalysisFailed(400, "잘못된 객체 이름", "bad_request")
+    return req.audio_object, req.photo_objects
 
 
-@app.post("/api/analyze")
-async def analyze(
-    audio: UploadFile = File(...),
-    photo: list[UploadFile] = File(default=[]),
-    duration_seconds: int = Form(0),
-):
-    if not GEMINI_API_KEY:
-        raise HTTPException(500, "backend/.env 에 GEMINI_API_KEY가 없음")
+async def _call_vertex(contents: list, metrics: dict) -> types.GenerateContentResponse:
+    deadline = time.monotonic() + VERTEX_DEADLINE_SECONDS
+    for attempt in range(MAX_RETRIES + 1):
+        remaining = deadline - time.monotonic()
+        try:
+            return await asyncio.wait_for(
+                genai_client.aio.models.generate_content(
+                    model=MODEL, contents=contents, config=GENERATION_CONFIG
+                ),
+                timeout=remaining,
+            )
+        except TimeoutError:
+            raise AnalysisFailed(504, "Vertex AI 응답 시간 초과", "timeout")
+        except genai_errors.APIError as e:
+            if (
+                e.code == 503
+                and attempt < MAX_RETRIES
+                and deadline - time.monotonic() > RETRY_DELAY_SECONDS
+            ):
+                metrics["retries"] += 1
+                print(f"[vertex] 503 과부하, 재시도 {attempt + 1}/{MAX_RETRIES}")
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
+                continue
+            print(f"[vertex] 오류 code={e.code} status={e.status} message={e.message}")
+            raise AnalysisFailed(502, f"Vertex AI 오류({e.code})", "model_error")
+    raise AssertionError("unreachable")
 
-    if duration_seconds and duration_seconds < MIN_AUDIO_SECONDS:
-        print(f"[analyze] 녹음 {duration_seconds}초 — 너무 짧아 Gemini 호출 생략")
-        return EMPTY_RESULT
 
-    parts = [{"text": build_schema_prompt()}]
+def _normalize(parsed: object) -> dict:
+    """스키마를 강제해도 앱 파싱이 깨지지 않도록 키·타입을 한 번 더 맞춘다."""
+    if not isinstance(parsed, dict):
+        raise AnalysisFailed(502, "Vertex AI 응답 형식 오류", "parse_error")
+    result = {}
+    for key, empty in EMPTY_RESULT.items():
+        value = parsed.get(key, empty)
+        if isinstance(empty, list):
+            result[key] = [str(v) for v in value] if isinstance(value, list) else []
+        else:
+            result[key] = value if isinstance(value, str) else ""
+    return result
 
-    audio_bytes = await audio.read()
-    audio_mime = _audio_mime(audio.filename, audio.content_type)
-    print(f"[analyze] audio={audio.filename} mime={audio_mime} bytes={len(audio_bytes)}")
 
-    # 오디오는 Files API로 올린 뒤 URI로 참조한다.
-    # inline_data로 넣으면 최신 flash 계열이 오디오를 조용히 버리고
-    # (응답 usage의 promptTokensDetails에 AUDIO가 아예 안 잡힌다) 프롬프트만 보고
-    # 그럴듯한 케이스를 지어낸다 — 환자 정보가 통째로 발명되는 셈이라 위험하다.
-    async with httpx.AsyncClient(timeout=75.0) as upload_client:
-        audio_uri = await upload_file(
-            upload_client, audio_bytes, audio_mime, audio.filename or "audio"
-        )
-    parts.append({"file_data": {"mime_type": audio_mime, "file_uri": audio_uri}})
+def _delete_session_objects(session_id: str) -> tuple[bool, int]:
+    """세션 폴더의 원본을 모두 지운다. (성공 여부, 지운 개수)를 돌려준다.
 
-    # 사진은 작아서 inline으로 충분하다(이미지는 정상 처리됨).
-    for p in photo[:3]:
-        photo_bytes = await p.read()
-        parts.append({
-            "inline_data": {
-                "mime_type": p.content_type or "image/jpeg",
-                "data": base64.b64encode(photo_bytes).decode(),
-            }
-        })
-
+    요청에 적힌 이름만이 아니라 세션 접두사 전체를 지워, 앱이 올려 놓고
+    분석 요청에 빠뜨린 파일까지 남기지 않는다. 그래도 놓친 파일은 버킷
+    수명 주기 규칙(1일 경과 후 자동 파기)이 치운다.
+    """
+    deleted = 0
+    ok = True
     try:
-        # 최신 flash 계열은 응답 전에 추론을 하므로 30초로는 긴 대화가 잘린다.
-        # 앱 쪽 타임아웃(90초)보다 짧게 두어, 서버가 먼저 이유 있는 에러를 만들게 한다.
-        async with httpx.AsyncClient(timeout=75.0) as client:
-            for attempt in range(3):  # Gemini 503(과부하)는 흔히 발생 — 최대 2회 재시도
-                try:
-                    res = await client.post(
-                        GEMINI_URL,
-                        params={"key": GEMINI_API_KEY},
-                        json={
-                            "contents": [{"parts": parts}],
-                            # 대화 듣고 정해진 스키마 채우는 작업이라 추론이 필요 없다.
-                            # thinking을 켜 두면 매 호출마다 그 오버헤드가 그대로
-                            # 응답 지연으로 붙는다 — 현장에서는 속도가 더 중요하다.
-                            "generationConfig": {
-                                "thinkingConfig": {"thinkingBudget": 0},
-                                # 온도를 낮춰서 대화에 없는 내용을 그럴듯하게
-                                # 채워 넣는 것(hallucination)을 최대한 억제한다 —
-                                # 이 작업은 창의성이 아니라 정확한 인용이 목적이다.
-                                "temperature": 0,
-                            },
-                        },
-                    )
-                except httpx.TimeoutException:
-                    # 502/504는 Cloudflare 터널이 자체 에러 페이지로 덮어써서 클라이언트에 원인이 안 보임 — 400 사용
-                    raise HTTPException(400, "Gemini 응답 시간 초과")
+        for blob in bucket.list_blobs(prefix=f"sessions/{session_id}/"):
+            try:
+                blob.delete()
+                deleted += 1
+            except NotFound:
+                pass
+            except Exception as e:
+                ok = False
+                print(f"[analyze] 삭제 실패 {blob.name}: {e!r}")
+    except Exception as e:
+        ok = False
+        print(f"[analyze] 삭제 대상 조회 실패: {e!r}")
+    return ok, deleted
 
-                if res.status_code == 503 and attempt < 2:
-                    print(f"[gemini] 503 과부하, 재시도 {attempt + 1}/2")
-                    await asyncio.sleep(1.5)
-                    continue
-                break
+
+class AnalyzeRequest(BaseModel):
+    session_id: str
+    audio_object: str
+    photo_objects: list[str] = []
+    duration_seconds: int | None = None
+    client_upload_ms: int | None = None
+
+
+async def _analyze_session(req: AnalyzeRequest, metrics: dict) -> dict:
+    audio_name, photo_names = _validated_names(req)
+
+    if req.duration_seconds is None:
+        raise AnalysisFailed(400, "duration_seconds가 필요합니다", "bad_request")
+    metrics["duration_seconds"] = req.duration_seconds
+    if req.duration_seconds < MIN_AUDIO_SECONDS:
+        # 이미 올라간 원본은 호출한 쪽의 finally에서 지운다.
+        print(f"[analyze] 녹음 {req.duration_seconds}초 — 너무 짧아 모델 호출 생략")
+        metrics["skipped"] = "too_short"
+        return dict(EMPTY_RESULT)
+
+    blobs = await asyncio.to_thread(
+        lambda: [bucket.get_blob(name) for name in [audio_name, *photo_names]]
+    )
+    audio_blob, photo_blobs = blobs[0], blobs[1:]
+    if audio_blob is None:
+        raise AnalysisFailed(400, "업로드된 오디오를 찾을 수 없음", "missing_object")
+    if any(b is None for b in photo_blobs):
+        raise AnalysisFailed(400, "업로드된 사진을 찾을 수 없음", "missing_object")
+    # Content-Type은 서명에 묶여 있어 발급할 때 정한 값 그대로다. 그래도
+    # 허용 목록 밖이면 모델에 넘기지 않는다.
+    if audio_blob.content_type not in AUDIO_TYPES or any(
+        b.content_type not in PHOTO_TYPES for b in photo_blobs
+    ):
+        raise AnalysisFailed(400, "허용하지 않는 파일 형식", "bad_request")
+    metrics["audio_bytes"] = audio_blob.size
+    metrics["photo_count"] = len(photo_blobs)
+    metrics["photo_bytes_total"] = sum(b.size for b in photo_blobs)
+
+    template, version = await _load_prompt()
+    metrics["prompt_version"] = version
+    now = datetime.now(KST).strftime("%H:%M")
+    # 오디오·사진은 내려받지 않고 gs:// 주소만 넘긴다 — Vertex AI가 버킷에서 직접 읽는다.
+    contents = [
+        types.Part.from_text(text=template.replace("{now}", now)),
+        types.Part.from_uri(
+            file_uri=f"gs://{BUCKET}/{audio_name}", mime_type=audio_blob.content_type
+        ),
+        *(
+            types.Part.from_uri(file_uri=f"gs://{BUCKET}/{b.name}", mime_type=b.content_type)
+            for b in photo_blobs
+        ),
+    ]
+
+    started = time.perf_counter()
+    try:
+        response = await _call_vertex(contents, metrics)
     finally:
-        # 분석이 성공하든 실패하든 환자 음성 사본은 구글 쪽에 남겨두지 않는다.
-        async with httpx.AsyncClient(timeout=15.0) as del_client:
-            await delete_uploaded_file(del_client, audio_uri)
-
-    if res.status_code != 200:
-        print(f"[gemini] status={res.status_code} body={res.text}")
-        raise HTTPException(400, f"Gemini API 오류({res.status_code}): {res.text}")
-
-    body = res.json()
+        metrics["timings_ms"]["inference"] = round((time.perf_counter() - started) * 1000)
 
     # 오디오가 실제로 모델 입력에 잡혔는지 남긴다. AUDIO가 0이면 모델이 소리를
     # 못 듣고 프롬프트만 보고 답을 지어낸 것이므로, 결과를 믿어선 안 된다.
-    usage = body.get("usageMetadata", {})
-    modalities = {
-        d.get("modality"): d.get("tokenCount")
-        for d in usage.get("promptTokensDetails", [])
-    }
-    print(f"[analyze] usage={modalities} thoughts={usage.get('thoughtsTokenCount')}")
-    if not modalities.get("AUDIO"):
+    usage = response.usage_metadata
+    details = (usage.prompt_tokens_details if usage else None) or []
+    audio_tokens = sum(
+        d.token_count or 0 for d in details if d.modality == types.MediaModality.AUDIO
+    )
+    metrics["audio_tokens"] = audio_tokens
+    modalities = {d.modality.value if d.modality else None: d.token_count for d in details}
+    print(f"[analyze] usage={modalities}")
+    if not audio_tokens:
         print("[analyze] 경고: 입력에 AUDIO 토큰이 없다 — 오디오가 모델에 닿지 않았다")
 
-    # 최신 모델은 parts에 thought 블록을 먼저 넣기도 해서, 첫 part만 보면
-    # text가 비어 있을 수 있다. text가 있는 part를 찾아 이어붙인다.
-    parts = body.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-    text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+    candidate = response.candidates[0] if response.candidates else None
+    finish_reason = candidate.finish_reason if candidate else None
+    metrics["finish_reason"] = finish_reason.value if finish_reason else None
+    if candidate is None:
+        raise AnalysisFailed(502, "Vertex AI 응답이 비어 있음", "model_error")
+    if finish_reason == types.FinishReason.MAX_TOKENS:
+        raise AnalysisFailed(502, "Vertex AI 응답이 잘림(MAX_TOKENS)", "max_tokens")
+
     try:
-        result = json.loads(strip_code_fence(text))
+        parsed = json.loads(response.text or "")
     except json.JSONDecodeError:
-        raise HTTPException(400, f"Gemini 응답 JSON 파싱 실패: {text}")
+        # 응답 원문은 환자 정보이므로 로그에 남기지 않는다.
+        raise AnalysisFailed(502, "Vertex AI 응답 JSON 파싱 실패", "parse_error")
+    return _normalize(parsed)
 
-    # 진단용 — 어떤 필드가 왜 잘못 채워지는지 실제 결과를 봐야 알 수 있다.
-    # 원인 확인되면 지운다.
-    print(f"[analyze] result={json.dumps(result, ensure_ascii=False)}")
 
-    return result
+@app.post("/api/analyze", dependencies=[Depends(require_app_token)])
+async def analyze(req: AnalyzeRequest):
+    """업로드된 오디오·사진의 gs:// 주소로 Vertex AI를 불러 구조화 결과를 돌려준다.
+
+    분석이 성공하든 실패하든 finally에서 세션 원본을 지운다. 결과 내용은
+    로그·DB 어디에도 남기지 않는다.
+    """
+    if not SESSION_ID.fullmatch(req.session_id):
+        raise HTTPException(400, "잘못된 세션 ID")
+
+    started = time.perf_counter()
+    metrics = {
+        "success": False,
+        "error_type": None,
+        "skipped": None,
+        "model": MODEL,
+        "vertex_location": VERTEX_LOCATION,
+        "prompt_version": None,
+        "duration_seconds": None,
+        "audio_bytes": None,
+        "photo_count": None,
+        "photo_bytes_total": None,
+        "audio_tokens": None,
+        "retries": 0,
+        "finish_reason": None,
+        "timings_ms": {"upload_client": req.client_upload_ms},  # 업로드는 앱이 잰 값
+        "delete_ok": None,
+    }
+    try:
+        result = await _analyze_session(req, metrics)
+        metrics["success"] = True
+        return result
+    except AnalysisFailed as e:
+        metrics["error_type"] = e.error_type
+        raise HTTPException(e.status, e.detail)
+    except Exception as e:
+        metrics["error_type"] = "internal"
+        print(f"[analyze] 예상치 못한 오류: {e!r}")
+        raise HTTPException(500, "분석 중 서버 오류")
+    finally:
+        # 분석 성공·실패와 무관하게 환자 원본을 버킷에 남기지 않는다.
+        delete_started = time.perf_counter()
+        delete_ok, deleted = await asyncio.to_thread(_delete_session_objects, req.session_id)
+        metrics["delete_ok"] = delete_ok
+        metrics["timings_ms"]["delete"] = round((time.perf_counter() - delete_started) * 1000)
+        metrics["timings_ms"]["server_total"] = round((time.perf_counter() - started) * 1000)
+        print(
+            f"[analyze] session={req.session_id} success={metrics['success']} "
+            f"error={metrics['error_type']} deleted={deleted} timings={metrics['timings_ms']}"
+        )
