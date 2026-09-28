@@ -348,6 +348,20 @@ def _delete_session_objects(session_id: str) -> tuple[bool, int]:
     return ok, deleted
 
 
+async def _record_metrics(session_id: str, metrics: dict) -> None:
+    """비식별 메타데이터(소요시간·성공 여부·파일 크기)만 metrics/{세션ID}에 남긴다.
+
+    환자 음성·사진·요약 내용은 넣지 않는다. 기록 실패가 대원에게 줄 결과를
+    막으면 안 되므로 로그만 남긴다.
+    """
+    try:
+        await firestore_client.collection("metrics").document(session_id).set(
+            {**metrics, "created_at": firestore.SERVER_TIMESTAMP}, timeout=5
+        )
+    except Exception as e:
+        print(f"[metrics] 기록 실패: {e!r}")
+
+
 class AnalyzeRequest(BaseModel):
     session_id: str
     audio_object: str
@@ -440,8 +454,8 @@ async def _analyze_session(req: AnalyzeRequest, metrics: dict) -> dict:
 async def analyze(req: AnalyzeRequest):
     """업로드된 오디오·사진의 gs:// 주소로 Vertex AI를 불러 구조화 결과를 돌려준다.
 
-    분석이 성공하든 실패하든 finally에서 세션 원본을 지운다. 결과 내용은
-    로그·DB 어디에도 남기지 않는다.
+    분석이 성공하든 실패하든 finally에서 세션 원본을 지우고, 비식별 메타데이터를
+    Firestore에 기록한다. 결과 내용은 로그·DB 어디에도 남기지 않는다.
     """
     if not SESSION_ID.fullmatch(req.session_id):
         raise HTTPException(400, "잘못된 세션 ID")
@@ -486,3 +500,5 @@ async def analyze(req: AnalyzeRequest):
             f"[analyze] session={req.session_id} success={metrics['success']} "
             f"error={metrics['error_type']} deleted={deleted} timings={metrics['timings_ms']}"
         )
+        # 단계별 소요시간은 발표 수치의 실측 근거가 된다.
+        await _record_metrics(req.session_id, metrics)
