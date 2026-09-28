@@ -1,5 +1,41 @@
 # 진행 상황
 
+## 현재 상태 (2026-09-28 기준)
+
+### 완료
+
+- 백엔드를 목표 아키텍처로 교체(`feature/vertex-backend`, push 완료): Signed URL 업로드 → gs:// URI로 Vertex 호출 →
+  `finally` 원본 삭제 → Firestore 비식별 metrics. 기존 안전장치 전부 유지, 요청 전체 75초 예산, 429·503 재시도.
+- Firestore `prompts/current`에 `version=2026-09-28a` 업로드, 서버가 기동 시 읽는 것 확인.
+- `backend/scripts/smoke_test.py` 작성(테스트 metrics는 `test: true` + `case`로 표시하고 지우지 않음).
+- 서울 429 반복으로 **AI 추론을 도쿄 `gemini-2.5-flash`로 결정·적용** — 로컬 `backend/.env`(`VERTEX_LOCATION=asia-northeast1`),
+  CLAUDE.md 배포 명령·문서 반영. 근거와 A/B 시험·채점은 아래 "AI 추론 리전 전환".
+- 여기까지는 **로컬에서만 검증**했다. Cloud Run 배포는 아직 안 했다.
+
+### 바로 다음 할 일
+
+1. **Cloud Run 배포** — CLAUDE.md "배포" 명령 사용, 아래 체크리스트 확인.
+2. **배포 URL로 스모크 테스트** — `python scripts\smoke_test.py <녹음> --duration <초> --server https://<Cloud Run 주소>`
+3. **"응답 후 삭제" 확인** — 아래 "배포 후 확인 필요" 참고(Cloud Run 요청 기반 CPU 할당에서 응답 후 삭제가 끝까지 도는지).
+
+### 그다음
+
+4. **앱 수정** — `lib/data/analysis_api.dart` 등(아래 "앱 수정 필요 사항").
+5. **실기기(태블릿) 테스트** — 배포된 서버 주소로.
+6. **로컬에서 main에 직접 병합(PR 없음).**
+   참고: CLAUDE.md "Git 규칙"은 "`feature/<작업명>` 브랜치 → PR → 리뷰 후 병합"이라 이 방식과 다르다.
+   병합 전에 규칙을 고칠지, 이번만 예외로 할지 정해 둘 것.
+
+### 배포 체크리스트
+
+- [ ] `--service-account=rapid-backend@match119-504015.iam.gserviceaccount.com` 지정(빠지면 권한 넓은 기본 계정으로 돈다)
+- [ ] `--allow-unauthenticated` 포함(앱은 IAM 인증 없이 `APP_TOKEN`으로만 호출)
+- [ ] `--region asia-northeast3`(Cloud Run은 서울), `--set-env-vars`에 **`VERTEX_LOCATION=asia-northeast1`**(추론은 도쿄), `MODEL=gemini-2.5-flash`
+- [ ] `SIGNER_EMAIL`은 **넣지 않는다**(Cloud Run은 런타임 서비스 계정으로 자동 서명)
+- [ ] `min-instances`는 **설정하지 않는다**(시연 당일에만 1로)
+- [ ] `APP_TOKEN` 실제 값은 명령어·문서·커밋·채팅·스크린샷 어디에도 남기지 않는다
+- [ ] 배포 직후 `/api/health`가 `vertex_location: asia-northeast1`을 돌려주는지 확인
+
 ## 백엔드 전환 (`feature/vertex-backend`)
 
 PoC(Gemini Developer API 키 + Files API + multipart 업로드)를 CLAUDE.md 목표 아키텍처로 교체했다.
