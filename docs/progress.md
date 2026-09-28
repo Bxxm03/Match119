@@ -11,7 +11,7 @@ PoC(Gemini Developer API 키 + Files API + multipart 업로드)를 CLAUDE.md 목
 | `POST /api/analyze` — gs:// URI로 Vertex AI(`gemini-2.5-flash`, `asia-northeast3`) 호출 | 완료, 로컬에서 실호출 확인 |
 | `finally`에서 세션 원본 삭제 | 완료, 정상·실패·짧은 녹음 모든 경로에서 삭제 확인 |
 | Firestore `metrics/{세션ID}`에 비식별 메타데이터·단계별 소요시간 기록 | 완료, 로컬에서 기록 확인(테스트 문서는 삭제함) |
-| Firestore `prompts/current` 프롬프트(캐시 TTL 1분 내 반영) | 코드 완료. **문서는 아직 안 올림** — 현재는 내장 기본 프롬프트(`version=builtin`)로 동작 |
+| Firestore `prompts/current` 프롬프트(캐시 TTL 1분 내 반영) | 완료. 2026-09-28에 `version=2026-09-28a`(내장 기본 프롬프트와 같은 내용) 업로드, 로컬 서버가 기동 시 이 버전을 읽는 것 확인 |
 | 공유 토큰 `X-RAPID-Token` — 무단 호출 방지용 최소 보호 | 완료 |
 | 요청 전체 75초 예산(업로드 확인·프롬프트 조회·모델 호출), 정리 단계는 예산 밖 짧은 한도 — 최악 86초 < 앱 90초 | 완료, 로컬에서 예산 소진·지연 상황 확인 |
 | Vertex 429·503 재시도(최대 2회, 지수 대기 + 지터, 남은 예산 안에서만), metrics에 코드별 횟수 | 완료, 가짜 응답으로 동작 확인 |
@@ -20,7 +20,6 @@ PoC(Gemini Developer API 키 + Files API + multipart 업로드)를 CLAUDE.md 목
 | Cloud Run 배포 | 예정 |
 
 남은 백엔드 작업:
-- `python seed_prompt.py <버전>`으로 `prompts/current` 올리기
 - Cloud Run 배포(CLAUDE.md 배포 명령, `APP_TOKEN` 값은 팀 내부로만 전달)
 
 ### 배포 후 확인 필요
