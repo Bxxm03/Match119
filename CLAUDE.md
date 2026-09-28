@@ -103,6 +103,16 @@ gcloud auth application-default login
 uvicorn main:app --reload --port 8000
 ```
 
+스모크 테스트 (서버를 띄운 상태에서, 다른 창의 `backend/`에서):
+
+```
+python scripts/smoke_test.py <오디오.m4a|.wav> [--photo 사진.jpg ...] [--duration 초] [--server 주소]
+```
+
+- uploads → PUT → analyze 후 원본 삭제·metrics·prompt_version까지 확인하고, 토큰 없음(401)·1초 녹음도 점검한다.
+- 이 스크립트로 생긴 metrics 기록은 지우지 않는다. `test: true`와 `case`(`normal` / `failure_check`)로
+  실제 기록과 구분하므로, 발표 수치를 집계할 때는 `test == true`를 제외한다.
+
 배포:
 
 ```
