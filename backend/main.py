@@ -82,8 +82,16 @@ AUDIO_NAME = re.compile(r"audio\.(m4a|wav)")
 PHOTO_NAME = re.compile(r"photo-[0-2]\.(jpg|png)")
 
 # 앱 타임아웃(90초)보다 짧게 두어, 서버가 먼저 이유 있는 에러를 만들게 한다.
-# 재시도까지 포함한 전체 한도다 — 시도마다 75초를 주면 최악 225초가 된다.
-VERTEX_DEADLINE_SECONDS = 75
+# 업로드 확인·프롬프트 조회·모델 호출(재시도 포함)을 모두 이 한 예산 안에서 처리하고,
+# 모델에는 앞 단계가 쓰고 남은 시간만 준다.
+REQUEST_DEADLINE_SECONDS = 75
+# 예산 안에서 부르는 GCS·Firestore 호출 한 번의 한도(남은 예산이 더 적으면 그만큼만).
+STORAGE_TIMEOUT_SECONDS = 5
+FIRESTORE_TIMEOUT_SECONDS = 5
+# 정리 단계(원본 삭제·메타데이터 기록)는 예산이 바닥나도 반드시 시도하므로 예산 밖에서
+# 따로 한도를 둔다. 최악: 75 + 목록 4 + 삭제 4(병렬) + 기록 3 = 86초 < 앱 90초.
+CLEANUP_TIMEOUT_SECONDS = 4
+METRICS_TIMEOUT_SECONDS = 3
 MAX_RETRIES = 2  # 503(과부하)는 흔히 발생 — 최대 2회 재시도
 RETRY_DELAY_SECONDS = 1.5
 
@@ -232,10 +240,18 @@ async def create_uploads(req: UploadRequest):
     }
 
 
+def _remaining(deadline: float, error_detail: str) -> float:
+    """남은 예산(초). 이미 바닥났으면 시간 초과로 끝낸다."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise AnalysisFailed(504, error_detail, "timeout")
+    return remaining
+
+
 _prompt_cache: tuple[float, str, str] | None = None
 
 
-async def _load_prompt() -> tuple[str, str]:
+async def _load_prompt(deadline: float) -> tuple[str, str]:
     """Firestore prompts/current에서 (템플릿, 버전)을 읽는다. 1분간 캐시한다.
 
     Firestore를 못 읽어도 분석 자체가 멈추면 안 되므로 내장 기본 프롬프트로
@@ -246,9 +262,16 @@ async def _load_prompt() -> tuple[str, str]:
     if _prompt_cache and now - _prompt_cache[0] < PROMPT_CACHE_SECONDS:
         return _prompt_cache[1], _prompt_cache[2]
 
+    timeout = min(FIRESTORE_TIMEOUT_SECONDS, _remaining(deadline, "서버 처리 시간 초과"))
     template, version = DEFAULT_PROMPT_TEMPLATE, DEFAULT_PROMPT_VERSION
     try:
-        snap = await firestore_client.collection("prompts").document("current").get(timeout=5)
+        # 라이브러리 자동 재시도는 끄고, 한도를 넘기면 기본 프롬프트로 넘어간다.
+        snap = await asyncio.wait_for(
+            firestore_client.collection("prompts").document("current").get(
+                timeout=timeout, retry=None
+            ),
+            timeout=timeout,
+        )
         data = snap.to_dict() if snap.exists else None
         if data and data.get("template"):
             template = data["template"]
@@ -257,6 +280,10 @@ async def _load_prompt() -> tuple[str, str]:
             print("[prompt] 경고: prompts/current 문서가 없어 내장 기본 프롬프트를 쓴다")
     except Exception as e:
         print(f"[prompt] 경고: Firestore 조회 실패, 내장 기본 프롬프트를 쓴다: {e!r}")
+
+    if "{now}" not in template:
+        # {now}가 없으면 모델이 "20분 전" 같은 상대시간을 절대시각으로 바꿀 기준이 없다.
+        print(f"[prompt] 경고: 프롬프트(version={version})에 {{now}}가 없어 현재 시각이 들어가지 않는다")
 
     _prompt_cache = (now, template, version)
     return template, version
@@ -281,10 +308,12 @@ def _validated_names(req: "AnalyzeRequest") -> tuple[str, list[str]]:
     return req.audio_object, req.photo_objects
 
 
-async def _call_vertex(contents: list, metrics: dict) -> types.GenerateContentResponse:
-    deadline = time.monotonic() + VERTEX_DEADLINE_SECONDS
+async def _call_vertex(
+    contents: list, metrics: dict, deadline: float
+) -> types.GenerateContentResponse:
+    """요청 예산에서 앞 단계가 쓰고 남은 시간 안에서만 모델을 부른다."""
     for attempt in range(MAX_RETRIES + 1):
-        remaining = deadline - time.monotonic()
+        remaining = _remaining(deadline, "Vertex AI 응답 시간 초과")
         try:
             return await asyncio.wait_for(
                 genai_client.aio.models.generate_content(
@@ -323,29 +352,50 @@ def _normalize(parsed: object) -> dict:
     return result
 
 
-def _delete_session_objects(session_id: str) -> tuple[bool, int]:
+def _delete_blob(blob: storage.Blob) -> None:
+    try:
+        blob.delete(timeout=CLEANUP_TIMEOUT_SECONDS)
+    except NotFound:
+        pass
+
+
+async def _delete_session_objects(session_id: str) -> tuple[bool, int]:
     """세션 폴더의 원본을 모두 지운다. (성공 여부, 지운 개수)를 돌려준다.
 
-    요청에 적힌 이름만이 아니라 세션 접두사 전체를 지워, 앱이 올려 놓고
-    분석 요청에 빠뜨린 파일까지 남기지 않는다. 그래도 놓친 파일은 버킷
+    요청 예산과 무관하게 항상 시도한다. 요청에 적힌 이름만이 아니라 세션 접두사
+    전체를 지워, 앱이 올려 놓고 분석 요청에 빠뜨린 파일까지 남기지 않는다.
+    한도 안에 못 끝낸 삭제는 스레드에서 계속 진행되고, 그래도 놓친 파일은 버킷
     수명 주기 규칙(1일 경과 후 자동 파기)이 치운다.
     """
-    deleted = 0
-    ok = True
     try:
-        for blob in bucket.list_blobs(prefix=f"sessions/{session_id}/"):
-            try:
-                blob.delete()
-                deleted += 1
-            except NotFound:
-                pass
-            except Exception as e:
-                ok = False
-                print(f"[analyze] 삭제 실패 {blob.name}: {e!r}")
+        blobs = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: list(
+                    bucket.list_blobs(
+                        prefix=f"sessions/{session_id}/", timeout=CLEANUP_TIMEOUT_SECONDS
+                    )
+                )
+            ),
+            timeout=CLEANUP_TIMEOUT_SECONDS,
+        )
     except Exception as e:
-        ok = False
         print(f"[analyze] 삭제 대상 조회 실패: {e!r}")
-    return ok, deleted
+        return False, 0
+
+    # 파일마다 기다리면 한도가 개수만큼 늘어나므로 병렬로 지운다.
+    results = await asyncio.gather(
+        *(
+            asyncio.wait_for(asyncio.to_thread(_delete_blob, b), timeout=CLEANUP_TIMEOUT_SECONDS)
+            for b in blobs
+        ),
+        return_exceptions=True,
+    )
+    ok = True
+    for blob, result in zip(blobs, results):
+        if isinstance(result, BaseException):
+            ok = False
+            print(f"[analyze] 삭제 실패 {blob.name}: {result!r}")
+    return ok, sum(1 for r in results if not isinstance(r, BaseException))
 
 
 async def _record_metrics(session_id: str, metrics: dict) -> None:
@@ -355,8 +405,13 @@ async def _record_metrics(session_id: str, metrics: dict) -> None:
     막으면 안 되므로 로그만 남긴다.
     """
     try:
-        await firestore_client.collection("metrics").document(session_id).set(
-            {**metrics, "created_at": firestore.SERVER_TIMESTAMP}, timeout=5
+        await asyncio.wait_for(
+            firestore_client.collection("metrics").document(session_id).set(
+                {**metrics, "created_at": firestore.SERVER_TIMESTAMP},
+                timeout=METRICS_TIMEOUT_SECONDS,
+                retry=None,
+            ),
+            timeout=METRICS_TIMEOUT_SECONDS,
         )
     except Exception as e:
         print(f"[metrics] 기록 실패: {e!r}")
@@ -370,7 +425,12 @@ class AnalyzeRequest(BaseModel):
     client_upload_ms: int | None = None
 
 
-async def _analyze_session(req: AnalyzeRequest, metrics: dict) -> dict:
+def _get_blob(name: str) -> storage.Blob | None:
+    # 자동 재시도는 끈다 — 재시도가 예산을 넘겨 쓰지 않게 한다.
+    return bucket.get_blob(name, timeout=STORAGE_TIMEOUT_SECONDS, retry=None)
+
+
+async def _analyze_session(req: AnalyzeRequest, metrics: dict, deadline: float) -> dict:
     audio_name, photo_names = _validated_names(req)
 
     if req.duration_seconds is None:
@@ -382,9 +442,16 @@ async def _analyze_session(req: AnalyzeRequest, metrics: dict) -> dict:
         metrics["skipped"] = "too_short"
         return dict(EMPTY_RESULT)
 
-    blobs = await asyncio.to_thread(
-        lambda: [bucket.get_blob(name) for name in [audio_name, *photo_names]]
-    )
+    timeout = min(STORAGE_TIMEOUT_SECONDS, _remaining(deadline, "서버 처리 시간 초과"))
+    try:
+        blobs = await asyncio.wait_for(
+            asyncio.gather(
+                *(asyncio.to_thread(_get_blob, name) for name in [audio_name, *photo_names])
+            ),
+            timeout=timeout,
+        )
+    except TimeoutError:
+        raise AnalysisFailed(504, "서버 처리 시간 초과(업로드 확인)", "timeout")
     audio_blob, photo_blobs = blobs[0], blobs[1:]
     if audio_blob is None:
         raise AnalysisFailed(400, "업로드된 오디오를 찾을 수 없음", "missing_object")
@@ -400,8 +467,9 @@ async def _analyze_session(req: AnalyzeRequest, metrics: dict) -> dict:
     metrics["photo_count"] = len(photo_blobs)
     metrics["photo_bytes_total"] = sum(b.size for b in photo_blobs)
 
-    template, version = await _load_prompt()
+    template, version = await _load_prompt(deadline)
     metrics["prompt_version"] = version
+    metrics["prompt_missing_now"] = "{now}" not in template
     now = datetime.now(KST).strftime("%H:%M")
     # 오디오·사진은 내려받지 않고 gs:// 주소만 넘긴다 — Vertex AI가 버킷에서 직접 읽는다.
     contents = [
@@ -417,7 +485,7 @@ async def _analyze_session(req: AnalyzeRequest, metrics: dict) -> dict:
 
     started = time.perf_counter()
     try:
-        response = await _call_vertex(contents, metrics)
+        response = await _call_vertex(contents, metrics, deadline)
     finally:
         metrics["timings_ms"]["inference"] = round((time.perf_counter() - started) * 1000)
 
@@ -461,6 +529,8 @@ async def analyze(req: AnalyzeRequest):
         raise HTTPException(400, "잘못된 세션 ID")
 
     started = time.perf_counter()
+    # 업로드 확인·프롬프트 조회·모델 호출이 함께 쓰는 요청 예산. 정리 단계는 예산 밖.
+    deadline = time.monotonic() + REQUEST_DEADLINE_SECONDS
     metrics = {
         "success": False,
         "error_type": None,
@@ -468,6 +538,7 @@ async def analyze(req: AnalyzeRequest):
         "model": MODEL,
         "vertex_location": VERTEX_LOCATION,
         "prompt_version": None,
+        "prompt_missing_now": None,  # 프롬프트에 {now}가 없어 현재 시각이 안 들어갔으면 True
         "duration_seconds": None,
         "audio_bytes": None,
         "photo_count": None,
@@ -479,7 +550,7 @@ async def analyze(req: AnalyzeRequest):
         "delete_ok": None,
     }
     try:
-        result = await _analyze_session(req, metrics)
+        result = await _analyze_session(req, metrics, deadline)
         metrics["success"] = True
         return result
     except AnalysisFailed as e:
@@ -490,9 +561,9 @@ async def analyze(req: AnalyzeRequest):
         print(f"[analyze] 예상치 못한 오류: {e!r}")
         raise HTTPException(500, "분석 중 서버 오류")
     finally:
-        # 분석 성공·실패와 무관하게 환자 원본을 버킷에 남기지 않는다.
+        # 분석 성공·실패, 예산 소진 여부와 무관하게 환자 원본 삭제를 반드시 시도한다.
         delete_started = time.perf_counter()
-        delete_ok, deleted = await asyncio.to_thread(_delete_session_objects, req.session_id)
+        delete_ok, deleted = await _delete_session_objects(req.session_id)
         metrics["delete_ok"] = delete_ok
         metrics["timings_ms"]["delete"] = round((time.perf_counter() - delete_started) * 1000)
         metrics["timings_ms"]["server_total"] = round((time.perf_counter() - started) * 1000)
