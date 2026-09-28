@@ -1,26 +1,124 @@
 import asyncio
 import base64
+import hmac
 import json
 import os
 import re
 import sys
-from datetime import datetime
+import threading
+import time
+import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 # Windows 콘솔 기본 인코딩(cp949)이 한글 로그의 em-dash 등을 못 받아써서
 # 요청 처리 중 서버가 죽었다. 프린트문마다 고치는 대신 stdout 자체를 UTF-8로
 # 고정해 이 클래스의 크래시를 통째로 없앤다.
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+import google.auth
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from google.auth.transport.requests import Request
+from google.cloud import storage
+from pydantic import BaseModel
 
 # 이보다 짧은 녹음은 Gemini를 부르지 않는다 — 대화라 부를 만한 게 담기기엔
 # 너무 짧아서, 모델이 애매한 잡음을 그럴듯한 응급상황으로 지어내는 원인이었다.
 MIN_AUDIO_SECONDS = 2
 
 load_dotenv(Path(__file__).parent / ".env")
+
+
+def _require_env(name: str) -> str:
+    """설정값은 코드에 박지 않는다. 빠졌으면 요청을 받기 전에 바로 멈춘다."""
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise SystemExit(f"환경변수 {name}이(가) 설정되지 않았습니다")
+    return value
+
+
+PROJECT_ID = _require_env("PROJECT_ID")
+REGION = _require_env("REGION")  # 버킷·Firestore·Cloud Run 리전
+BUCKET = _require_env("BUCKET")
+MODEL = _require_env("MODEL")  # 별칭(gemini-flash-latest 등) 말고 모델 ID를 그대로
+# Vertex AI 호출 리전. REGION과 분리해 두어, 비상 전환 시 코드 수정 없이
+# VERTEX_LOCATION·MODEL만 바꿔 재배포한다.
+VERTEX_LOCATION = _require_env("VERTEX_LOCATION")
+if VERTEX_LOCATION == "global":
+    # global은 처리 리전을 보장하지 않아 "특정 리전에서 처리한다"고 말할 수 없다.
+    raise SystemExit("VERTEX_LOCATION=global은 사용하지 않습니다 — 리전을 명시하세요")
+# 앱만 부르게 하는 공유 토큰 — 무단 호출 방지용 최소 보호일 뿐 보안 인증이 아니다
+# (APK에서 추출할 수 있는 값이다).
+APP_TOKEN = _require_env("APP_TOKEN")
+# Signed URL 서명 주체. Cloud Run에서는 런타임 서비스 계정이 자동으로 잡히므로
+# 비워 두고, 로컬(사용자 계정 ADC)에서만 rapid-backend 서비스 계정을 적는다.
+SIGNER_EMAIL = os.environ.get("SIGNER_EMAIL", "").strip()
+
+# onset 절대시각 계산용. Cloud Run은 UTC로 돌기 때문에 시간대를 명시해야 한다.
+KST = ZoneInfo("Asia/Seoul")
+
+# 서버가 객체 이름을 정한다. 앱이 보낸 MIME은 허용 목록으로만 확장자에 대응시킨다.
+AUDIO_TYPES = {"audio/mp4": "m4a", "audio/wav": "wav"}
+PHOTO_TYPES = {"image/jpeg": "jpg", "image/png": "png"}
+MAX_PHOTOS = 3
+MAX_AUDIO_BYTES = 50 * 1024 * 1024
+MAX_PHOTO_BYTES = 10 * 1024 * 1024
+SIGNED_URL_TTL = timedelta(minutes=10)
+SESSION_ID = re.compile(r"[0-9a-f]{32}")
+
+storage_client = storage.Client(project=PROJECT_ID)
+bucket = storage_client.bucket(BUCKET)
+
+# Cloud Run에는 서명용 개인키가 없다. ADC 액세스 토큰으로 IAM signBlob을 불러
+# 서명한다(서비스 계정이 자기 자신에 대해 serviceAccountTokenCreator 필요).
+_credentials, _ = google.auth.default(
+    scopes=["https://www.googleapis.com/auth/cloud-platform"]
+)
+_credentials_lock = threading.Lock()
+
+
+def _signing_identity() -> tuple[str, str]:
+    """서명에 쓸 (서비스 계정 이메일, 액세스 토큰)을 돌려준다."""
+    with _credentials_lock:
+        if not _credentials.valid:
+            _credentials.refresh(Request())
+        token = _credentials.token
+    # Compute Engine 자격증명은 refresh 전까지 이메일이 "default"로 남는다.
+    email = SIGNER_EMAIL or getattr(_credentials, "service_account_email", "")
+    if not email or email == "default":
+        raise RuntimeError("서명할 서비스 계정을 알 수 없습니다 — 로컬에서는 SIGNER_EMAIL을 설정하세요")
+    return email, token
+
+
+def _signed_put(name: str, mime: str, max_bytes: int, email: str, token: str) -> dict:
+    # Content-Type과 용량 상한을 서명에 묶어, 앱이 다른 형식·큰 파일을 올리면
+    # GCS가 거부하게 한다. 앱은 headers를 그대로 붙여 PUT해야 한다.
+    headers = {"x-goog-content-length-range": f"0,{max_bytes}"}
+    url = bucket.blob(name).generate_signed_url(
+        version="v4",
+        method="PUT",
+        expiration=SIGNED_URL_TTL,
+        content_type=mime,
+        # 라이브러리가 넘긴 dict에 Host를 끼워 넣으므로 사본을 준다.
+        headers=dict(headers),
+        service_account_email=email,
+        access_token=token,
+    )
+    return {
+        "object": name,
+        "url": url,
+        "method": "PUT",
+        "headers": {"Content-Type": mime, **headers},
+    }
+
+
+def require_app_token(x_rapid_token: str = Header(default="")) -> None:
+    """무단 호출 방지용 최소 보호 — 앱과 공유한 토큰이 맞는지만 본다."""
+    if not hmac.compare_digest(x_rapid_token.encode(), APP_TOKEN.encode()):
+        raise HTTPException(401, "인증 실패")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # 별칭을 기본값으로 둔다. 특정 버전을 박아 두면 그 모델이 내려갈 때 404로 죽는다
@@ -35,6 +133,61 @@ app = FastAPI()
 async def health():
     """앱이 백엔드를 찾았는지 확인하는 용도. 키 값은 노출하지 않는다."""
     return {"ok": True, "model": GEMINI_MODEL, "key_configured": bool(GEMINI_API_KEY)}
+
+
+class UploadRequest(BaseModel):
+    audio_mime: str
+    photo_mimes: list[str] = []
+
+
+@app.post("/api/uploads", dependencies=[Depends(require_app_token)])
+async def create_uploads(req: UploadRequest):
+    """세션 ID와 객체 이름을 서버가 정해 PUT용 Signed URL을 발급한다.
+
+    앱이 이름을 정하게 두면 다른 세션의 객체를 덮어쓰거나 지울 수 있으므로,
+    이름은 항상 서버가 만든다. 이어올리기(resumable)는 아직 없고 단순 PUT이다.
+    """
+    audio_ext = AUDIO_TYPES.get(req.audio_mime)
+    if not audio_ext:
+        raise HTTPException(400, f"허용하지 않는 오디오 형식: {req.audio_mime}")
+    if len(req.photo_mimes) > MAX_PHOTOS:
+        raise HTTPException(400, f"사진은 최대 {MAX_PHOTOS}장입니다")
+    for mime in req.photo_mimes:
+        if mime not in PHOTO_TYPES:
+            raise HTTPException(400, f"허용하지 않는 사진 형식: {mime}")
+
+    session_id = uuid.uuid4().hex
+    prefix = f"sessions/{session_id}"
+
+    def sign_all() -> dict:
+        email, token = _signing_identity()
+        return {
+            "audio": _signed_put(
+                f"{prefix}/audio.{audio_ext}", req.audio_mime, MAX_AUDIO_BYTES, email, token
+            ),
+            "photos": [
+                _signed_put(
+                    f"{prefix}/photo-{i}.{PHOTO_TYPES[mime]}", mime, MAX_PHOTO_BYTES, email, token
+                )
+                for i, mime in enumerate(req.photo_mimes)
+            ],
+        }
+
+    started = time.perf_counter()
+    try:
+        # 서명마다 IAM signBlob 네트워크 호출이 나가므로 이벤트 루프를 막지 않게 한다.
+        urls = await asyncio.to_thread(sign_all)
+    except Exception as e:
+        print(f"[uploads] 서명 실패: {e!r}")
+        raise HTTPException(500, "업로드 주소 발급 실패")
+    sign_ms = round((time.perf_counter() - started) * 1000)
+    print(f"[uploads] session={session_id} photos={len(req.photo_mimes)} sign_ms={sign_ms}")
+
+    return {
+        "session_id": session_id,
+        "expires_at": (datetime.now(KST) + SIGNED_URL_TTL).isoformat(timespec="seconds"),
+        **urls,
+    }
 
 # 대화 원문 표현 + 의학용어 병기(기본 필드) / ai_impression은 질환군명 수준까지만 / reasons는 평이한 관찰언어
 # — EMS_기획안_v2.md 03번 섹션 스키마·원칙 그대로.
