@@ -8,7 +8,7 @@ PoC(Gemini Developer API 키 + Files API + multipart 업로드)를 CLAUDE.md 목
 |---|---|
 | `POST /api/uploads` — 서버가 세션 ID·객체 이름을 정하고 PUT Signed URL 발급(IAM signBlob) | 완료, 로컬에서 실제 버킷으로 확인 |
 | Content-Type·용량 상한(오디오 50MB, 사진 10MB)을 서명에 묶음 | 완료, 형식 불일치 403 / 상한 초과 거부 확인 |
-| `POST /api/analyze` — gs:// URI로 Vertex AI(`gemini-2.5-flash`, `asia-northeast3`) 호출 | 완료, 로컬에서 실호출 확인 |
+| `POST /api/analyze` — gs:// URI로 Vertex AI(`gemini-2.5-flash`, 도쿄 `asia-northeast1`) 호출 | 완료, 로컬에서 실호출 확인. 2026-09-28 서울 → 도쿄 전환(아래 "AI 추론 리전 전환") |
 | `finally`에서 세션 원본 삭제 | 완료, 정상·실패·짧은 녹음 모든 경로에서 삭제 확인 |
 | Firestore `metrics/{세션ID}`에 비식별 메타데이터·단계별 소요시간 기록 | 완료, 로컬에서 기록 확인(테스트 문서는 삭제함) |
 | Firestore `prompts/current` 프롬프트(캐시 TTL 1분 내 반영) | 완료. 2026-09-28에 `version=2026-09-28a`(내장 기본 프롬프트와 같은 내용) 업로드, 로컬 서버가 기동 시 이 버전을 읽는 것 확인 |
@@ -21,11 +21,50 @@ PoC(Gemini Developer API 키 + Files API + multipart 업로드)를 CLAUDE.md 목
 
 남은 백엔드 작업:
 - Cloud Run 배포(CLAUDE.md 배포 명령, `APP_TOKEN` 값은 팀 내부로만 전달)
-- **Vertex 429가 연속으로 나온다 (2026-09-28 자체 측정).** `scripts/smoke_test.py`로 로컬에서 두 번 돌렸을 때
-  `gemini-2.5-flash`·`asia-northeast3` 호출이 세 번 연속 429 RESOURCE_EXHAUSTED(재시도 2회 소진)로 실패했다.
-  429 하나가 돌아오는 데 약 7초가 걸려 요청이 26~31초 걸린 뒤 502로 끝났다. 같은 날 앞선 호출은 대부분 성공했다.
-  시연 전에 할당량 상태(콘솔 IAM 및 관리자 → 할당량)를 확인하고, 계속되면 비상 대안(CLAUDE.md) 전환이나
-  할당량 증설 요청을 검토한다.
+
+## AI 추론 리전 전환: 서울 → 도쿄 (2026-09-28 결정)
+
+**결정:** Vertex AI 호출을 `asia-northeast3`(서울) → **`asia-northeast1`(도쿄)**, 모델은 `gemini-2.5-flash` 유지.
+버킷·Firestore·Cloud Run은 서울 그대로. 발표 문구: "원본 파일 보관·삭제는 서울 리전, AI 추론은 도쿄 리전".
+코드 변경 없이 환경변수(`VERTEX_LOCATION`)만 바꿨다.
+
+### 서울 429 관찰 (자체 측정)
+
+- 서울 `gemini-2.5-flash`로 스모크 테스트를 16:40~17:03에 5분 이상 간격으로 4회 → **4회 모두 실패, HTTP 호출 12번 모두 429 RESOURCE_EXHAUSTED.**
+  그보다 앞선 스모크 테스트 2회도 같은 양상으로 실패.
+- google-genai는 자체 재시도를 하지 않는다(`retry_options` 미설정 → 1회 시도, 실측으로도 호출당 HTTP 1번 확인).
+  **429 하나가 돌아오는 데 Vertex 쪽에서 6.4~8.8초**가 걸려, 재시도 2회를 합쳐 요청마다 24~29초 뒤 502.
+- 콘솔 할당량 화면의 서울 사용률 **0.05%** → 우리 할당량이 아니라 리전 공유 용량 부족(조정 불가 시스템 한도)으로 판단.
+
+### 도쿄 A/B 시험 (같은 녹음 `Scenario.m4a` 74초, 모델당 2회, 3분 간격)
+
+| | 성공 / 429 | 분석 요청 평균(앱 기준) | 추론 평균(서버) | 1회차 / 2회차 추론 |
+|---|---|---|---|---|
+| **A** 도쿄 `gemini-2.5-flash` | 2 / 0 | 6.5초 | 5.7초 | 6.6초 / 4.8초 |
+| **B** 도쿄 `gemini-3.5-flash` | 2 / 0 | 8.3초 | 7.5초 | 6.5초 / 8.6초 |
+
+- 두 모델 모두 `thinking_budget 0` 정상(thinking 토큰 없음, `finish_reason=STOP`), `response_schema` 8칸·타입 준수,
+  AUDIO 토큰 정상(A 1,875 / B 1,858).
+- 모델당 2회라 소요시간 차이는 참고 수준.
+
+### 채점 (정답 기준: 실제 대화 텍스트, 성공 4건 × 8칸)
+
+| | ✅ 맞음 | ⚠️ 부분 | ❌ 틀림 | ➖ 빠짐 | 🚫 지어냄(칸) | 칸 안에 대화에 없는 내용 |
+|---|---|---|---|---|---|---|
+| **A** 2.5-flash | 7 | 9 | 0 | 0 | 0 | 0 |
+| **B** 3.5-flash | 6 | 8 | 2 | 0 | 0 | 2 |
+
+- A: onset(40분 전 시작 → 20분 전 악화)을 2회 모두 담음. 약점은 ai_impression이 증상명("흉통")에 머묾,
+  chief_complaint 원문 표현 형식이 2회 중 1회만 지켜짐, 1회차에 가족력(아버지 심근경색) 누락.
+- B: ai_impression은 질환군("심혈관계 질환")으로 적절. 그러나 guardian에 **"동승 예정(부모)", "동승 예정(아버지)"** —
+  대화는 "아버지가 오신다"뿐이라 어머니·동승은 지어낸 내용. onset 악화 시점 2회 모두 누락, reasons에 "방사통" 같은 의학용어.
+- 공통: last_normal_time은 모두 빈칸으로 정확, onset 절대시각은 실행 시각 기준으로 정확, "진단/확정" 같은 단정 표현 없음.
+- **지어낸 내용이 없는 A를 선택.** A의 ai_impression·chief_complaint 약점은 Firestore 프롬프트 보강으로 나아질 여지가 있다(진행 여부 미정).
+
+### 남은 일
+
+- `gemini-2.5-flash`는 **2026-10-20 종료**. 10/7 이후에도 쓰려면 그 전에 도쿄 `gemini-3.5-flash`로 전환하되,
+  보호자 칸 지어냄을 막도록 프롬프트를 보강한 뒤 같은 방식으로 다시 채점한다.
 
 ### 배포 후 확인 필요
 
