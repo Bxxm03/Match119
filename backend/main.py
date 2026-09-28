@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -103,6 +104,9 @@ RETRY_BASE_DELAY_SECONDS = 1.0
 
 # 프롬프트 수정은 캐시 TTL(1분) 내 반영된다.
 PROMPT_CACHE_SECONDS = 60
+# Firestore 조회가 실패해 기본 프롬프트로 대신했을 때는 짧게만 캐시해, 복구되면
+# 곧 Firestore 프롬프트로 돌아가게 한다.
+PROMPT_FALLBACK_CACHE_SECONDS = 10
 
 GENERATION_CONFIG = types.GenerateContentConfig(
     # 온도를 낮춰서 대화에 없는 내용을 그럴듯하게 채워 넣는 것(hallucination)을
@@ -131,7 +135,19 @@ _credentials, _ = google.auth.default(
 )
 _credentials_lock = threading.Lock()
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # 첫 요청이 Firestore 연결·조회 시간(실측 1초 이상)을 떠안지 않게 기동 시 미리 읽어 둔다.
+    # 실패해도 기동은 계속하고(기본 프롬프트 10초 캐시), 이후 요청에서 다시 읽는다.
+    try:
+        _, version = await _load_prompt(time.monotonic() + FIRESTORE_TIMEOUT_SECONDS)
+        print(f"[prompt] 기동 시 프롬프트 캐시 완료 (version={version})")
+    except Exception as e:
+        print(f"[prompt] 경고: 기동 시 프롬프트 조회 실패: {e!r}")
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 class AnalysisFailed(Exception):
@@ -254,6 +270,7 @@ def _remaining(deadline: float, error_detail: str) -> float:
     return remaining
 
 
+# (캐시 만료 시각, 템플릿, 버전)
 _prompt_cache: tuple[float, str, str] | None = None
 
 
@@ -261,15 +278,16 @@ async def _load_prompt(deadline: float) -> tuple[str, str]:
     """Firestore prompts/current에서 (템플릿, 버전)을 읽는다. 1분간 캐시한다.
 
     Firestore를 못 읽어도 분석 자체가 멈추면 안 되므로 내장 기본 프롬프트로
-    대신하고 버전을 "builtin"으로 남긴다.
+    대신하고 버전을 "builtin"으로 남긴다. 이때는 10초만 캐시한다.
     """
     global _prompt_cache
     now = time.monotonic()
-    if _prompt_cache and now - _prompt_cache[0] < PROMPT_CACHE_SECONDS:
+    if _prompt_cache and now < _prompt_cache[0]:
         return _prompt_cache[1], _prompt_cache[2]
 
     timeout = min(FIRESTORE_TIMEOUT_SECONDS, _remaining(deadline, "서버 처리 시간 초과"))
     template, version = DEFAULT_PROMPT_TEMPLATE, DEFAULT_PROMPT_VERSION
+    ttl = PROMPT_CACHE_SECONDS
     try:
         # 라이브러리 자동 재시도는 끄고, 한도를 넘기면 기본 프롬프트로 넘어간다.
         snap = await asyncio.wait_for(
@@ -285,13 +303,14 @@ async def _load_prompt(deadline: float) -> tuple[str, str]:
         else:
             print("[prompt] 경고: prompts/current 문서가 없어 내장 기본 프롬프트를 쓴다")
     except Exception as e:
-        print(f"[prompt] 경고: Firestore 조회 실패, 내장 기본 프롬프트를 쓴다: {e!r}")
+        ttl = PROMPT_FALLBACK_CACHE_SECONDS
+        print(f"[prompt] 경고: Firestore 조회 실패, 내장 기본 프롬프트를 {ttl}초간 쓴다: {e!r}")
 
     if "{now}" not in template:
         # {now}가 없으면 모델이 "20분 전" 같은 상대시간을 절대시각으로 바꿀 기준이 없다.
         print(f"[prompt] 경고: 프롬프트(version={version})에 {{now}}가 없어 현재 시각이 들어가지 않는다")
 
-    _prompt_cache = (now, template, version)
+    _prompt_cache = (now + ttl, template, version)
     return template, version
 
 
