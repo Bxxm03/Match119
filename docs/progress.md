@@ -21,6 +21,11 @@ PoC(Gemini Developer API 키 + Files API + multipart 업로드)를 CLAUDE.md 목
 
 남은 백엔드 작업:
 - Cloud Run 배포(CLAUDE.md 배포 명령, `APP_TOKEN` 값은 팀 내부로만 전달)
+- **Vertex 429가 연속으로 나온다 (2026-09-28 자체 측정).** `scripts/smoke_test.py`로 로컬에서 두 번 돌렸을 때
+  `gemini-2.5-flash`·`asia-northeast3` 호출이 세 번 연속 429 RESOURCE_EXHAUSTED(재시도 2회 소진)로 실패했다.
+  429 하나가 돌아오는 데 약 7초가 걸려 요청이 26~31초 걸린 뒤 502로 끝났다. 같은 날 앞선 호출은 대부분 성공했다.
+  시연 전에 할당량 상태(콘솔 IAM 및 관리자 → 할당량)를 확인하고, 계속되면 비상 대안(CLAUDE.md) 전환이나
+  할당량 증설 요청을 검토한다.
 
 ### 배포 후 확인 필요
 
