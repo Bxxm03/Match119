@@ -32,7 +32,7 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 | 항목 | 값 |
 |---|---|
 | 프로젝트 ID | `match119-504015` (같은 이름의 `match119`는 사용하지 않음) |
-| 리전 | `asia-northeast3` (서울) — 버킷·Firestore·Cloud Run 모두 동일. Vertex AI 호출 리전은 별도 값(`VERTEX_LOCATION`)이며 현재도 `asia-northeast3` — 아래 "Vertex AI 모델" 참고 |
+| 리전 | 버킷·Firestore·Cloud Run은 서울(`asia-northeast3`), **AI 추론만 도쿄(`asia-northeast1`)**. Vertex AI 호출 리전은 별도 값(`VERTEX_LOCATION`) — 아래 "Vertex AI 모델" 참고 |
 | 버킷 | `rapid-temp-uploads-match119` (공개 차단, 균일 액세스, 1일 경과 자동 삭제) |
 | 런타임 서비스 계정 | `rapid-backend@match119-504015.iam.gserviceaccount.com` |
 | 서비스 계정 권한 | 버킷 `storage.objectAdmin`, `datastore.user`, `aiplatform.user`, 자기 자신 `iam.serviceAccountTokenCreator` |
@@ -48,17 +48,28 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 | 항목 | 값 |
 |---|---|
 | 사용 모델 | `gemini-2.5-flash` (GA) |
-| Vertex 호출 리전 | `asia-northeast3` (서울) |
+| Vertex 호출 리전 | `asia-northeast1` (도쿄) — 2026-09-28 서울에서 전환 |
 | 모델 종료(retirement) 예정일 | **2026-10-20** |
 
-- 서울 리전에서 오디오+이미지 실호출까지 검증된 유일한 GA Flash 모델이라 선택했다.
-  대회 일정(~2026-10-07)이 종료일보다 앞서 지금은 문제없지만,
-  **10/7 이후에도 시연이 필요하면 종료일(2026-10-20) 전에 반드시 아래 비상 대안으로 전환한다.**
+- 대회 일정(~2026-10-07)이 종료일보다 앞서 지금은 문제없지만,
+  **10/7 이후에도 시연이 필요하면 종료일(2026-10-20) 전에 반드시 도쿄 `gemini-3.5-flash`로 전환한다**
+  (아래 "10/20 이후 대안").
 
-### 비상 대안 (서울 리전이 막히거나 10/20 이후 사용해야 할 때)
+### 서울 → 도쿄 전환 근거 (2026-09-28, 자체 측정)
 
-- `gemini-3.5-flash` + `asia-northeast1`(도쿄) — 실호출 검증 완료, 종료일 2027-05-19 이후.
-- 전환 시 발표 문구를 "AI 추론은 도쿄(asia-northeast1) 리전"으로 고친다.
+- 서울(`asia-northeast3`)의 `gemini-2.5-flash`가 **429 RESOURCE_EXHAUSTED를 반복**했다 — 스모크 테스트
+  4회(약 22분, 16:40~17:03), HTTP 호출 12번 모두 429. 429 하나에 6~9초씩 걸려 요청마다 24~29초 뒤 실패.
+- 콘솔 할당량 화면의 서울 사용률은 **0.05%** — 우리 할당량 문제가 아니라 리전 공유 용량 부족(조정 불가 시스템 한도)으로 판단.
+- 도쿄 A/B 시험(같은 녹음, 모델당 2회): A `gemini-2.5-flash`, B `gemini-3.5-flash` 모두 2/2 성공·429 없음,
+  `thinking_budget 0`·`response_schema` 정상. 실제 대화 텍스트 기준 채점(16칸):
+  A ✅7 ⚠️9 ❌0, 대화에 없는 내용 0건 / B ✅6 ⚠️8 ❌2, 보호자 칸에 대화에 없는 내용("부모", "동승 예정") 2건.
+  분석 요청 평균 A 6.5초, B 8.3초. 지어낸 내용이 없는 A를 택했다. 상세는 `docs/progress.md`.
+
+### 10/20 이후 대안
+
+- `gemini-3.5-flash` + `asia-northeast1`(도쿄) — 위 A/B 시험으로 실호출·스키마 검증 완료, 종료일 2027-05-19 이후.
+  `MODEL`만 바꿔 재배포하면 된다. 다만 시험에서 보호자 칸에 대화에 없는 내용을 적은 적이 있으므로,
+  전환 전에 프롬프트 보강 후 다시 채점한다.
 - **`global` 엔드포인트는 사용 금지.** 처리 리전을 보장하지 않아 "특정 리전에서 처리한다"고 말할 수 없게 된다.
 
 ### 모델 호출 시 주의사항 (검증 중 발견)
@@ -80,7 +91,7 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 | `REGION` | ✔ | `asia-northeast3` — 버킷·Firestore·Cloud Run 리전 |
 | `BUCKET` | ✔ | `rapid-temp-uploads-match119` |
 | `MODEL` | ✔ | `gemini-2.5-flash` — 별칭 금지, 모델 ID 그대로 |
-| `VERTEX_LOCATION` | ✔ | `asia-northeast3` — Vertex AI 호출 리전. `REGION`과 분리해서, 비상 전환 시 코드 수정 없이 `VERTEX_LOCATION`과 `MODEL`만 바꿔 재배포한다. `global`이면 기동 거부 |
+| `VERTEX_LOCATION` | ✔ | `asia-northeast1`(도쿄) — Vertex AI 호출 리전. `REGION`과 분리해서, 비상 전환 시 코드 수정 없이 `VERTEX_LOCATION`과 `MODEL`만 바꿔 재배포한다. `global`이면 기동 거부 |
 | `APP_TOKEN` | ✔ | 앱과 공유하는 토큰(`X-RAPID-Token` 헤더). **무단 호출 방지용 최소 보호**이지 보안 인증이 아니다(APK에서 추출 가능). 커밋 금지 |
 | `SIGNER_EMAIL` | 로컬만 | `rapid-backend@match119-504015.iam.gserviceaccount.com` — 로컬 ADC(사용자 계정)에서 Signed URL 서명 주체. Cloud Run에서는 비워 둔다(런타임 서비스 계정 자동 사용) |
 
@@ -119,7 +130,7 @@ python scripts/smoke_test.py <오디오.m4a|.wav> [--photo 사진.jpg ...] [--du
 gcloud run deploy rapid-backend --source backend/ --region asia-northeast3 ^
   --service-account=rapid-backend@match119-504015.iam.gserviceaccount.com ^
   --allow-unauthenticated ^
-  --set-env-vars=PROJECT_ID=match119-504015,REGION=asia-northeast3,BUCKET=rapid-temp-uploads-match119,MODEL=gemini-2.5-flash,VERTEX_LOCATION=asia-northeast3,APP_TOKEN=<공유토큰>
+  --set-env-vars=PROJECT_ID=match119-504015,REGION=asia-northeast3,BUCKET=rapid-temp-uploads-match119,MODEL=gemini-2.5-flash,VERTEX_LOCATION=asia-northeast1,APP_TOKEN=<공유토큰>
 ```
 
 - `--service-account`를 빼먹으면 권한이 넓은 기본 계정으로 돈다. 반드시 지정.
@@ -161,6 +172,8 @@ gcloud run deploy rapid-backend --source backend/ --region asia-northeast3 ^
   예: resumable 업로드를 구현하기 전에는 "이어올리기"를 완료형으로 쓰지 않는다.
   예: GCS 수명 주기 규칙은 "즉시"가 아니라 "누락 대비 1일 경과 후 자동 파기"다.
 - 우리의 GCS 원본 삭제와 Google 측 ZDR 설정은 다른 개념이다. 발표에서는 "원본 즉시 삭제"로 표현.
+- 리전은 **"원본 파일 보관·삭제는 서울 리전, AI 추론은 도쿄 리전"**으로 표현한다.
+  "모든 처리를 서울에서 한다"거나 리전을 뭉뚱그려 말하지 않는다.
 - 공유 토큰(`APP_TOKEN`)은 "보안 인증"이 아니라 **"무단 호출 방지용 최소 보호"**로 쓴다.
 - Firestore 프롬프트 수정은 "즉시 반영"이 아니라 **"캐시 TTL(1분) 내 반영"**으로 쓴다.
 
