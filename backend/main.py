@@ -2,6 +2,7 @@ import asyncio
 import hmac
 import json
 import os
+import random
 import re
 import sys
 import threading
@@ -92,8 +93,13 @@ FIRESTORE_TIMEOUT_SECONDS = 5
 # 따로 한도를 둔다. 최악: 75 + 목록 4 + 삭제 4(병렬) + 기록 3 = 86초 < 앱 90초.
 CLEANUP_TIMEOUT_SECONDS = 4
 METRICS_TIMEOUT_SECONDS = 3
-MAX_RETRIES = 2  # 503(과부하)는 흔히 발생 — 최대 2회 재시도
-RETRY_DELAY_SECONDS = 1.5
+# 503(과부하)와 429(할당량 초과)는 흔히 발생 — 남은 예산 안에서만 최대 2회 재시도.
+# 서울 리전 테스트에서 503보다 429가 더 자주 나왔다.
+RETRYABLE_CODES = (429, 503)
+MAX_RETRIES = 2
+# 대기 시간: 1초, 2초 … 로 두 배씩 늘리고, 여러 요청이 동시에 다시 몰리지 않게
+# 0~1초 지터를 더한다.
+RETRY_BASE_DELAY_SECONDS = 1.0
 
 # 프롬프트 수정은 캐시 TTL(1분) 내 반영된다.
 PROMPT_CACHE_SECONDS = 60
@@ -324,14 +330,20 @@ async def _call_vertex(
         except TimeoutError:
             raise AnalysisFailed(504, "Vertex AI 응답 시간 초과", "timeout")
         except genai_errors.APIError as e:
+            delay = RETRY_BASE_DELAY_SECONDS * 2**attempt + random.uniform(0, RETRY_BASE_DELAY_SECONDS)
+            # 기다린 뒤에도 예산이 남아 있을 때만 다시 부른다.
             if (
-                e.code == 503
+                e.code in RETRYABLE_CODES
                 and attempt < MAX_RETRIES
-                and deadline - time.monotonic() > RETRY_DELAY_SECONDS
+                and deadline - time.monotonic() > delay
             ):
                 metrics["retries"] += 1
-                print(f"[vertex] 503 과부하, 재시도 {attempt + 1}/{MAX_RETRIES}")
-                await asyncio.sleep(RETRY_DELAY_SECONDS)
+                metrics["retries_by_code"][str(e.code)] += 1
+                print(
+                    f"[vertex] {e.code} {e.status}, {delay:.1f}초 후 재시도 "
+                    f"{attempt + 1}/{MAX_RETRIES}"
+                )
+                await asyncio.sleep(delay)
                 continue
             print(f"[vertex] 오류 code={e.code} status={e.status} message={e.message}")
             raise AnalysisFailed(502, f"Vertex AI 오류({e.code})", "model_error")
@@ -545,6 +557,7 @@ async def analyze(req: AnalyzeRequest):
         "photo_bytes_total": None,
         "audio_tokens": None,
         "retries": 0,
+        "retries_by_code": {str(code): 0 for code in RETRYABLE_CODES},  # {"429": n, "503": n}
         "finish_reason": None,
         "timings_ms": {"upload_client": req.client_upload_ms},  # 업로드는 앱이 잰 값
         "delete_ok": None,
