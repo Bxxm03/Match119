@@ -27,11 +27,14 @@ import 'recording_service.dart';
 class RealAssistantController
     with WidgetsBindingObserver
     implements AssistantController {
-  RealAssistantController({required this.apiBaseUrl});
+  RealAssistantController({required this.apiBaseUrl, this.apiToken = ''});
 
   /// 서비스 isolate는 본앱의 컴파일 타임 상수를 볼 수 없어, 시작할 때 저장해
   /// 넘겨 준다.
   final String apiBaseUrl;
+
+  /// 공유 토큰. [apiBaseUrl]과 같은 방식으로 서비스에 넘긴다.
+  final String apiToken;
 
   final _picker = ImagePicker();
   final _controller = StreamController<AssistantState>.broadcast();
@@ -247,6 +250,7 @@ class RealAssistantController
 
     // 서비스 isolate가 읽을 수 있도록 먼저 저장한다.
     await FlutterForegroundTask.saveData(key: kApiBaseUrl, value: apiBaseUrl);
+    await FlutterForegroundTask.saveData(key: kApiToken, value: apiToken);
 
     final result = await FlutterForegroundTask.startService(
       serviceTypes: [ForegroundServiceTypes.microphone],

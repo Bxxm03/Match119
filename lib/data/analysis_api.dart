@@ -20,11 +20,15 @@ class AnalysisException implements Exception {
 /// 거친다. 백엔드가 오디오+사진을 멀티모달 한 번의 호출로 Gemini에 넘기고
 /// 구조화 JSON을 돌려준다(별도 STT 단계 없음).
 class AnalysisApi {
-  AnalysisApi({required this.baseUrl, http.Client? client})
+  AnalysisApi({required this.baseUrl, this.token = '', http.Client? client})
       : _client = client ?? http.Client();
 
   /// 개발 중에는 로컬 서버, 배포 시에는 Cloud Run 주소가 된다.
   final String baseUrl;
+
+  /// 백엔드 `APP_TOKEN`과 같은 공유 토큰(`X-RAPID-Token`). 무단 호출 방지용
+  /// 최소 보호일 뿐 보안 인증이 아니다. 값은 로그에 남기지 않는다.
+  final String token;
   final http.Client _client;
 
   /// 앱이 백엔드를 찾았는지 확인한다.
@@ -49,6 +53,7 @@ class AnalysisApi {
       'POST',
       Uri.parse('$baseUrl/api/analyze'),
     );
+    request.headers['X-RAPID-Token'] = token;
     request.fields['duration_seconds'] = durationSeconds.toString();
 
     request.files.add(await http.MultipartFile.fromPath('audio', audio.path));
