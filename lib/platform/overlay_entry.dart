@@ -5,10 +5,12 @@ import '../theme/tokens.dart';
 import '../ui/capsule.dart';
 import 'overlay_protocol.dart';
 
-/// 캡슐 오버레이 isolate 진입점.
+/// 캡슐 오버레이 isolate 진입점의 실제 구현.
 ///
-/// 이름 `overlayMain`은 flutter_overlay_window의 네이티브 코드가 하드코딩해
-/// 찾으므로 바꾸면 안 된다(`OverlayService.java` 참고).
+/// flutter_overlay_window의 네이티브 코드는 루트 라이브러리(`main.dart`)의
+/// `overlayMain`을 이름으로 찾는다(`OverlayService.java` 참고). 그래서
+/// `main.dart`에 같은 이름의 진입점을 두고 이 함수를 부른다 — 두 이름 모두
+/// 바꾸면 안 된다.
 ///
 /// 이 isolate에는 플러그인이 등록되지 않는다 — 플러그인 자체 채널인
 /// `shareData` / `overlayListener`만 쓸 수 있다. 그래서 캡슐은 녹음도 분석도

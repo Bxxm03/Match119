@@ -6,13 +6,20 @@ import 'data/analysis_api.dart';
 import 'platform/assistant_controller.dart';
 import 'platform/fake_assistant_controller.dart';
 import 'platform/local_assistant_controller.dart';
+import 'platform/overlay_entry.dart' as overlay;
 import 'platform/real_assistant_controller.dart';
 import 'theme/tokens.dart';
 import 'ui/app_shell.dart';
 
-// 캡슐 오버레이 isolate의 진입점을 여기서 다시 노출해 둔다. 네이티브 코드가
-// 이름으로 찾는 함수라, 참조가 없으면 트리 셰이킹에 날아갈 수 있다.
-export 'platform/overlay_entry.dart' show overlayMain;
+/// 캡슐 오버레이 isolate의 진입점.
+///
+/// flutter_overlay_window의 네이티브 코드는 `overlayMain`을 **루트 라이브러리
+/// (main.dart)** 에서 이름으로 찾는다. `export`로 재노출만 하면 디버그(JIT)에서는
+/// 찾히지만 릴리즈(AOT)에서는 루트 라이브러리에 심볼이 없어 캡슐이 뜨지 않는다.
+/// 그래서 여기에 직접 정의하고 `vm:entry-point`로 트리 셰이킹을 막는다.
+/// 실제 구현은 `platform/overlay_entry.dart`에 있다.
+@pragma('vm:entry-point')
+void overlayMain() => overlay.overlayMain();
 
 /// 분석 서버 주소. `--dart-define=RAPID_API=...`로 덮어쓴다.
 ///
