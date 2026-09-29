@@ -49,3 +49,6 @@ app.*.map.json
 backend/.env
 backend/.venv/
 backend/__pycache__/
+
+# 로컬 실행 설정(공유 토큰 포함) — dart_defines.example.json을 복사해 채운다
+dart_defines.json

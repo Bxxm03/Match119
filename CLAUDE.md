@@ -155,8 +155,17 @@ gcloud run deploy rapid-backend --source backend/ --region asia-northeast3 ^
 ## 프론트엔드 (Flutter)
 
 - UI는 유지. 서버 통신은 `lib/data/analysis_api.dart`에서만 한다.
-- 백엔드 주소는 `--dart-define=RAPID_API=<주소>` (기본값 `http://127.0.0.1:8000`, USB + `adb reverse tcp:8000 tcp:8000`)
-- 공유 토큰은 `--dart-define=RAPID_TOKEN=<APP_TOKEN과 같은 값>` (앱 반영은 예정 — `docs/progress.md`)
+- 실행 설정은 레포 루트의 `dart_defines.json`에 둔다. `dart_defines.example.json`을 복사해 값을 채운다
+  (`dart_defines.json`은 `.gitignore`에 제외돼 있어 커밋되지 않는다).
+
+  | 키 | 값 |
+  |---|---|
+  | `RAPID_API` | 백엔드 주소. Cloud Run이면 서비스 URL, 로컬 서버면 `http://127.0.0.1:8000`(USB + `adb reverse tcp:8000 tcp:8000`). 비우면 기본값 `http://127.0.0.1:8000` |
+  | `RAPID_TOKEN` | `APP_TOKEN`과 같은 값. `X-RAPID-Token` 헤더로 전송(무단 호출 방지용 최소 보호). 커밋·로그 금지 |
+
+  ```
+  flutter run --dart-define-from-file=dart_defines.json
+  ```
 - 화면만 볼 때: `--dart-define=RAPID_FAKE=true`
 
 ## 용어·표현 규칙 (코드 주석, UI 문구, 문서 모두 적용)
