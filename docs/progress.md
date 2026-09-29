@@ -1,6 +1,6 @@
 # 진행 상황
 
-## 현재 상태 (2026-09-28 기준)
+## 현재 상태 (2026-09-29 기준)
 
 ### 완료
 
@@ -10,31 +10,69 @@
 - `backend/scripts/smoke_test.py` 작성(테스트 metrics는 `test: true` + `case`로 표시하고 지우지 않음).
 - 서울 429 반복으로 **AI 추론을 도쿄 `gemini-2.5-flash`로 결정·적용** — 로컬 `backend/.env`(`VERTEX_LOCATION=asia-northeast1`),
   CLAUDE.md 배포 명령·문서 반영. 근거와 A/B 시험·채점은 아래 "AI 추론 리전 전환".
-- 여기까지는 **로컬에서만 검증**했다. Cloud Run 배포는 아직 안 했다.
+- **Cloud Run 배포 완료 (2026-09-29)** — 서비스 URL `https://rapid-backend-537817162523.asia-northeast3.run.app`,
+  리비전 `rapid-backend-00001-jrp`. 아래 "Cloud Run 배포 (2026-09-29)" 참고.
+- **배포 URL로 스모크 테스트 15/15 통과** (`Scenario.m4a` 74초).
 
 ### 바로 다음 할 일
 
-1. **Cloud Run 배포** — CLAUDE.md "배포" 명령 사용, 아래 체크리스트 확인.
-2. **배포 URL로 스모크 테스트** — `python scripts\smoke_test.py <녹음> --duration <초> --server https://<Cloud Run 주소>`
-3. **"응답 후 삭제" 확인** — 아래 "배포 후 확인 필요" 참고(Cloud Run 요청 기반 CPU 할당에서 응답 후 삭제가 끝까지 도는지).
+1. **"응답 후 삭제" 확인** — 정상 경로(4초 안에 삭제 완료)는 Cloud Run에서 확인했다. 4초 한도를 넘겨
+   응답 후 스레드에서 이어지는 삭제는 **미확인** — 아래 "배포 후 확인 필요" 참고. 재현하려면 지연을 넣은 리비전을 한 번 더 배포해야 한다(진행 여부 미정).
 
 ### 그다음
 
-4. **앱 수정** — `lib/data/analysis_api.dart` 등(아래 "앱 수정 필요 사항").
-5. **실기기(태블릿) 테스트** — 배포된 서버 주소로.
-6. **로컬에서 main에 직접 병합(PR 없음).**
+2. **앱 수정** — `lib/data/analysis_api.dart` 등(아래 "앱 수정 필요 사항").
+3. **실기기(태블릿) 테스트** — 배포된 서버 주소로.
+4. **로컬에서 main에 직접 병합(PR 없음).**
    참고: CLAUDE.md "Git 규칙"은 "`feature/<작업명>` 브랜치 → PR → 리뷰 후 병합"이라 이 방식과 다르다.
    병합 전에 규칙을 고칠지, 이번만 예외로 할지 정해 둘 것.
 
-### 배포 체크리스트
+### 배포 체크리스트 (2026-09-29 배포에서 모두 확인)
 
-- [ ] `--service-account=rapid-backend@match119-504015.iam.gserviceaccount.com` 지정(빠지면 권한 넓은 기본 계정으로 돈다)
-- [ ] `--allow-unauthenticated` 포함(앱은 IAM 인증 없이 `APP_TOKEN`으로만 호출)
-- [ ] `--region asia-northeast3`(Cloud Run은 서울), `--set-env-vars`에 **`VERTEX_LOCATION=asia-northeast1`**(추론은 도쿄), `MODEL=gemini-2.5-flash`
-- [ ] `SIGNER_EMAIL`은 **넣지 않는다**(Cloud Run은 런타임 서비스 계정으로 자동 서명)
-- [ ] `min-instances`는 **설정하지 않는다**(시연 당일에만 1로)
-- [ ] `APP_TOKEN` 실제 값은 명령어·문서·커밋·채팅·스크린샷 어디에도 남기지 않는다
-- [ ] 배포 직후 `/api/health`가 `vertex_location: asia-northeast1`을 돌려주는지 확인
+- [x] `--service-account=rapid-backend@match119-504015.iam.gserviceaccount.com` 지정(빠지면 권한 넓은 기본 계정으로 돈다)
+- [x] `--allow-unauthenticated` 포함(앱은 IAM 인증 없이 `APP_TOKEN`으로만 호출)
+- [x] `--region asia-northeast3`(Cloud Run은 서울), `--set-env-vars`에 **`VERTEX_LOCATION=asia-northeast1`**(추론은 도쿄), `MODEL=gemini-2.5-flash`
+- [x] `SIGNER_EMAIL`은 **넣지 않는다**(Cloud Run은 런타임 서비스 계정으로 자동 서명)
+- [x] `min-instances`는 **설정하지 않는다**(시연 당일에만 1로)
+- [x] `APP_TOKEN` 실제 값은 명령어·문서·커밋·채팅·스크린샷 어디에도 남기지 않는다
+  (`backend/.env`에서 셸 변수로 읽어 `APP_TOKEN=$T`로 전달)
+- [x] 배포 직후 `/api/health`가 `vertex_location: asia-northeast1`을 돌려주는지 확인
+
+## Cloud Run 배포 (2026-09-29)
+
+- 서비스 `rapid-backend`, 서울 `asia-northeast3`, 리비전 `rapid-backend-00001-jrp`
+- URL: `https://rapid-backend-537817162523.asia-northeast3.run.app`
+- 런타임 서비스 계정 `rapid-backend`, 환경변수는 `PROJECT_ID, REGION, BUCKET, MODEL, VERTEX_LOCATION, APP_TOKEN` 6개
+  (`SIGNER_EMAIL` 없음, min-instances 미설정). CPU 할당은 기본값(요청 기반).
+- `/api/health` → `{"ok":true,"model":"gemini-2.5-flash","vertex_location":"asia-northeast1"}`
+
+### 첫 배포에서 막힌 점과 조치
+
+- `--source` 배포는 **빌드에 기본 Compute 서비스 계정**(`537817162523-compute@developer.gserviceaccount.com`)을 쓴다.
+  이 계정에 역할이 하나도 없어 소스 zip을 못 읽고 403으로 실패했다(서비스는 생성되지 않음).
+- 조치: 이 계정에 `roles/run.builder`만 부여(프로젝트 수준). 런타임 계정 `rapid-backend`에 빌드 권한을 주는 방식은 권한이 넓어져 택하지 않았다.
+- 소스 배포로 새로 생긴 리소스: Artifact Registry `cloud-run-source-deploy`(서울), 버킷 `run-sources-match119-504015-asia-northeast3`
+  (업로드 소스 zip 보관 — `.env`는 `.dockerignore`로 제외돼 들어가지 않음).
+
+### 배포 URL 스모크 테스트 (자체 측정, `Scenario.m4a` 74초, 사진 0장) — 15/15 통과
+
+| 단계 | 소요시간 |
+|---|---|
+| URL 발급(앱 기준) | 0.7초 |
+| GCS PUT(앱 기준, 897KB) | 2.4초 |
+| 분석 요청(앱 기준) | 5.2초 |
+| 합계(앱 기준) | 8.2초 |
+| 추론(서버) / 삭제(서버) / 서버 전체 | 4.7초 / 0.07초 / 5.0초 |
+
+- AUDIO 토큰 1,875, `finish_reason=STOP`, 재시도 0회, `prompt_version=2026-09-28a`, GCS 원본 삭제·metrics 기록 확인.
+- 토큰 없음 → 401, 1초 녹음 → 모델 호출 없이 빈 결과(`skipped=too_short`)·원본 삭제 확인.
+- 결과 내용은 도쿄 A/B 시험 A와 같은 양상(onset 악화 시점 포함, ai_impression은 증상명 "흉통").
+- 1회 실행이라 소요시간은 참고 수준. 첫 요청이라 콜드 스타트가 포함됐을 수 있다.
+
+### 로컬 스모크 테스트 환경 주의
+
+- Windows에서 `pip install -r requirements.txt`가 한글 주석 때문에 `UnicodeDecodeError: 'cp949'`로 실패할 수 있다.
+  `set PYTHONUTF8=1` 후 설치하면 된다.
 
 ## 백엔드 전환 (`feature/vertex-backend`)
 
@@ -53,10 +91,11 @@ PoC(Gemini Developer API 키 + Files API + multipart 업로드)를 CLAUDE.md 목
 | Vertex 429·503 재시도(최대 2회, 지수 대기 + 지터, 남은 예산 안에서만), metrics에 코드별 횟수 | 완료, 가짜 응답으로 동작 확인 |
 | 기동 시 프롬프트 미리 캐시, 조회 실패 시 기본 프롬프트 10초 캐시 | 완료 |
 | 이어올리기(resumable) 업로드 | 미구현(예정). 현재는 단순 PUT |
-| Cloud Run 배포 | 예정 |
+| Cloud Run 배포 | 완료(2026-09-29), 배포 URL 스모크 테스트 15/15 통과 — 위 "Cloud Run 배포 (2026-09-29)" |
 
 남은 백엔드 작업:
-- Cloud Run 배포(CLAUDE.md 배포 명령, `APP_TOKEN` 값은 팀 내부로만 전달)
+- 응답 후 이어지는 삭제가 Cloud Run에서 끝까지 도는지 확인(아래 "배포 후 확인 필요")
+- `APP_TOKEN` 값은 팀 내부로만 전달(앱 `--dart-define=RAPID_TOKEN`에 같은 값)
 
 ## AI 추론 리전 전환: 서울 → 도쿄 (2026-09-28 결정)
 
@@ -112,6 +151,9 @@ PoC(Gemini Developer API 키 + Files API + multipart 업로드)를 CLAUDE.md 목
     원본이 남아 있는지 본다(평소엔 삭제가 0.1~0.2초라 드물다 — 필요하면 일부러 지연시켜 재현).
   - 남는다면: 버킷 수명 주기(누락 대비 1일 경과 후 자동 파기)가 최종 안전망이다. 더 줄여야 하면
     CPU 상시 할당(`--no-cpu-throttling`, 비용 증가) 또는 삭제 한도를 늘리는 쪽을 검토한다.
+  - **2026-09-29 확인 결과(부분):** 배포 URL 스모크 테스트 후 metrics의 `delete_ok: false`는 0건,
+    버킷 `sessions/`는 비어 있음. 다만 삭제가 0.07초 만에 끝나 **응답 후 이어지는 경로는 실행되지 않았다 — 여전히 미확인.**
+    확인하려면 삭제에 지연을 넣은 리비전을 따로 배포해 재현해야 한다(진행 여부 미정).
 
 ## 앱 수정 필요 사항 (이번 백엔드 작업에서는 앱 코드를 고치지 않았다)
 
