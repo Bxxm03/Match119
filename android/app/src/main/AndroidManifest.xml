@@ -7,6 +7,11 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- 분석 서버 통신. debug·profile 빌드는 Flutter가 자동으로 넣어 주지만
+         release APK에는 main 매니페스트에 있어야 한다 — 없으면 시연 빌드에서
+         서버에 연결할 수 없다. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- 백그라운드 마이크 캡처는 Android 14(API 34)부터 microphone 타입이 필수다.
          타입 선언이 없으면 서비스 시작 즉시 크래시한다. 시험 기기가 API 34라
          이 규제가 실제로 걸린다. -->

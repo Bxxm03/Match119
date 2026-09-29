@@ -224,7 +224,12 @@ class LocalAssistantController implements AssistantController {
     _emit(_state.copyWith(analyzing: true, clearResult: true, clearError: true));
 
     try {
-      final result = await api.analyze(audio: audio, photos: List.of(_photos));
+      final result = await api.analyze(
+        audio: audio,
+        photos: List.of(_photos),
+        // 서버 필수값이자 2초 미만 녹음 가드의 기준.
+        durationSeconds: _state.recordedSeconds,
+      );
       // 분석 중에 취소하거나 새 녹음을 시작했으면 결과를 버린다.
       if (generation != _analysisGeneration) return;
       _emit(_state.copyWith(analyzing: false, result: result));

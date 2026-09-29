@@ -52,9 +52,13 @@ class RecordingTaskHandler extends TaskHandler {
     _log('시작 (starter=${starter.name})');
 
     // 서비스는 본앱의 컴파일 타임 상수를 볼 수 없으므로, 시작할 때 저장해 둔
-    // 주소를 읽어 온다.
+    // 주소와 공유 토큰을 읽어 온다.
     final baseUrl = await FlutterForegroundTask.getData<String>(key: kApiBaseUrl);
-    _api = AnalysisApi(baseUrl: baseUrl ?? 'http://127.0.0.1:8000');
+    final token = await FlutterForegroundTask.getData<String>(key: kApiToken);
+    _api = AnalysisApi(
+      baseUrl: baseUrl ?? 'http://127.0.0.1:8000',
+      token: token ?? '',
+    );
 
     // 캡슐이 보내는 명령을 직접 받는다. 본앱이 죽어 있어도 캡슐의 마이크 버튼이
     // 동작해야 하므로, 본앱을 경유하지 않는 이 경로가 있어야 한다.

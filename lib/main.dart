@@ -25,10 +25,19 @@ export 'platform/overlay_entry.dart' show overlayMain;
 /// - 같은 와이파이 — `RAPID_API=http://<개발PC LAN IP>:8000`. PC 방화벽에서
 ///   8000 포트를 열어야 한다.
 /// - Cloud Run — `RAPID_API=https://<서비스주소>`. 시연처럼 PC가 없는 곳에서.
-const _apiBaseUrl = String.fromEnvironment(
-  'RAPID_API',
-  defaultValue: 'http://127.0.0.1:8000',
-);
+///
+/// `dart_defines.json`에 빈 문자열로 두면 `defaultValue`가 적용되지 않고 ""가
+/// 들어오므로, 빈 값도 기본값으로 돌린다.
+const _apiBaseUrlDefine = String.fromEnvironment('RAPID_API');
+const _apiBaseUrl = _apiBaseUrlDefine == ''
+    ? 'http://127.0.0.1:8000'
+    : _apiBaseUrlDefine;
+
+/// 백엔드 `APP_TOKEN`과 같은 공유 토큰. `--dart-define=RAPID_TOKEN=...`
+/// (보통 `dart_defines.json`)으로 받아 `X-RAPID-Token` 헤더로 보낸다.
+/// 무단 호출 방지용 최소 보호일 뿐 보안 인증이 아니다(APK에서 추출 가능).
+/// 값은 로그에 남기지 않는다.
+const _apiToken = String.fromEnvironment('RAPID_TOKEN');
 
 /// 컨트롤러를 Fake로 강제할 때 쓴다: `--dart-define=RAPID_FAKE=true`.
 /// 백엔드를 띄우지 않고 화면만 볼 때 편하다.
@@ -52,12 +61,17 @@ Future<AssistantController> _buildController() async {
   // 안드로이드에서만 시스템 오버레이와 포그라운드 서비스가 성립한다.
   // 데스크톱(개발 노트북)에서는 녹음·분석만 실제로 도는 구현을 쓴다.
   if (Platform.isAndroid && !_noOverlay) {
-    final controller = RealAssistantController(apiBaseUrl: _apiBaseUrl);
+    final controller = RealAssistantController(
+      apiBaseUrl: _apiBaseUrl,
+      apiToken: _apiToken,
+    );
     await controller.init();
     return controller;
   }
 
-  return LocalAssistantController(api: AnalysisApi(baseUrl: _apiBaseUrl));
+  return LocalAssistantController(
+    api: AnalysisApi(baseUrl: _apiBaseUrl, token: _apiToken),
+  );
 }
 
 class RapidApp extends StatefulWidget {

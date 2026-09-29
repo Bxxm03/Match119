@@ -24,15 +24,15 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 
 - 범위: 위 클라우드 파이프라인까지. 온디바이스(Gemini Nano)는 현재 범위 밖이며,
   동의 거부 분기는 "준비 중" 상태로 둔다.
-- 현재 `backend/main.py`는 PoC 상태(Gemini Developer API 키 + Files API, multipart 업로드).
-  위 구조로 교체하는 것이 진행 중인 작업이다.
+- `backend/`는 위 구조로 교체됨(`feature/vertex-backend`). 앱(`lib/data/analysis_api.dart`)은 아직
+  구 multipart 방식이라 새 흐름으로 바꾸는 작업이 남아 있다 — `docs/progress.md` 참고.
 
 ## GCP 리소스
 
 | 항목 | 값 |
 |---|---|
 | 프로젝트 ID | `match119-504015` (같은 이름의 `match119`는 사용하지 않음) |
-| 리전 | `asia-northeast3` (서울) — 버킷·Firestore·Cloud Run 모두 동일. Vertex AI 호출 리전은 별도 값(`VERTEX_LOCATION`)이며 현재도 `asia-northeast3` — 아래 "Vertex AI 모델" 참고 |
+| 리전 | 버킷·Firestore·Cloud Run은 서울(`asia-northeast3`), **AI 추론만 도쿄(`asia-northeast1`)**. Vertex AI 호출 리전은 별도 값(`VERTEX_LOCATION`) — 아래 "Vertex AI 모델" 참고 |
 | 버킷 | `rapid-temp-uploads-match119` (공개 차단, 균일 액세스, 1일 경과 자동 삭제) |
 | 런타임 서비스 계정 | `rapid-backend@match119-504015.iam.gserviceaccount.com` |
 | 서비스 계정 권한 | 버킷 `storage.objectAdmin`, `datastore.user`, `aiplatform.user`, 자기 자신 `iam.serviceAccountTokenCreator` |
@@ -40,23 +40,32 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 - 서비스 계정 키(JSON)는 만들지도, 공유하지도 않는다. 로컬은 각자 `gcloud auth application-default login`.
 - Cloud Run에는 서명용 개인키가 없다. Signed URL은 IAM signBlob 방식
   (`service_account_email` + `access_token` 전달)으로 서명한다.
+- 로컬에서 `/api/uploads`를 쓰려면 **본인 계정**에도 `rapid-backend` 서비스 계정에 대한
+  `iam.serviceAccountTokenCreator`가 있어야 한다(없으면 서명 단계에서 403).
 
 ## Vertex AI 모델
 
 | 항목 | 값 |
 |---|---|
 | 사용 모델 | `gemini-2.5-flash` (GA) |
-| Vertex 호출 리전 | `asia-northeast3` (서울) |
+| Vertex 호출 리전 | `asia-northeast1` (도쿄) — 2026-09-28 서울에서 전환 |
 | 모델 종료(retirement) 예정일 | **2026-10-20** |
 
-- 서울 리전에서 오디오+이미지 실호출까지 검증된 유일한 GA Flash 모델이라 선택했다.
-  대회 일정(~2026-10-07)이 종료일보다 앞서 지금은 문제없지만,
-  **10/7 이후에도 시연이 필요하면 종료일(2026-10-20) 전에 반드시 아래 비상 대안으로 전환한다.**
+- 대회 일정(~2026-10-07)이 종료일보다 앞서 지금은 문제없지만,
+  **10/7 이후에도 시연이 필요하면 종료일(2026-10-20) 전에 반드시 도쿄 `gemini-3.5-flash`로 전환한다**
+  (아래 "10/20 이후 대안").
 
-### 비상 대안 (서울 리전이 막히거나 10/20 이후 사용해야 할 때)
+### 서울 → 도쿄 전환 근거 (2026-09-28, 자체 측정)
 
-- `gemini-3.5-flash` + `asia-northeast1`(도쿄) — 실호출 검증 완료, 종료일 2027-05-19 이후.
-- 전환 시 발표 문구를 "AI 추론은 도쿄(asia-northeast1) 리전"으로 고친다.
+- 서울(`asia-northeast3`)의 `gemini-2.5-flash`가 **429 RESOURCE_EXHAUSTED를 반복**했다 — 스모크 테스트
+  4회(약 22분, 16:40~17:03), HTTP 호출 12번 모두 429. 429 하나에 6~9초씩 걸려 요청마다 24~29초 뒤 실패.
+- 콘솔 할당량 화면의 서울 사용률은 **0.05%** — 우리 할당량 문제가 아니라 리전 공유 용량 부족(조정 불가 시스템 한도)으로 판단.
+
+### 10/20 이후 대안
+
+- `gemini-3.5-flash` + `asia-northeast1`(도쿄) — 위 A/B 시험으로 실호출·스키마 검증 완료, 종료일 2027-05-19 이후.
+  `MODEL`만 바꿔 재배포하면 된다. 다만 시험에서 보호자 칸에 대화에 없는 내용을 적은 적이 있으므로,
+  전환 전에 프롬프트 보강 후 다시 채점한다.
 - **`global` 엔드포인트는 사용 금지.** 처리 리전을 보장하지 않아 "특정 리전에서 처리한다"고 말할 수 없게 된다.
 
 ### 모델 호출 시 주의사항 (검증 중 발견)
@@ -70,9 +79,23 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 ## 백엔드 (`backend/`)
 
 - Python **3.13** (Dockerfile도 `python:3.13-slim`). 팀원 모두 3.13.x 사용.
-- 설정값은 코드에 박지 않고 환경변수로 받는다: `PROJECT_ID`, `REGION`(버킷·Firestore·Cloud Run 리전),
-  `BUCKET`, `MODEL`, `VERTEX_LOCATION`(Vertex AI 호출 리전 — `REGION`과 분리해서, 비상 전환 시 코드
-  수정 없이 `VERTEX_LOCATION`과 `MODEL`만 바꿔 재배포할 수 있게 한다).
+- 설정값은 코드에 박지 않고 환경변수로 받는다. 필수값이 빠지면 서버가 기동하지 않는다.
+
+| 변수 | 필수 | 예 / 설명 |
+|---|---|---|
+| `PROJECT_ID` | ✔ | `match119-504015` |
+| `REGION` | ✔ | `asia-northeast3` — 버킷·Firestore·Cloud Run 리전 |
+| `BUCKET` | ✔ | `rapid-temp-uploads-match119` |
+| `MODEL` | ✔ | `gemini-2.5-flash` — 별칭 금지, 모델 ID 그대로 |
+| `VERTEX_LOCATION` | ✔ | `asia-northeast1`(도쿄) — Vertex AI 호출 리전. `REGION`과 분리해서, 비상 전환 시 코드 수정 없이 `VERTEX_LOCATION`과 `MODEL`만 바꿔 재배포한다. `global`이면 기동 거부 |
+| `APP_TOKEN` | ✔ | 앱과 공유하는 토큰(`X-RAPID-Token` 헤더). **무단 호출 방지용 최소 보호**이지 보안 인증이 아니다(APK에서 추출 가능). 커밋 금지 |
+| `SIGNER_EMAIL` | 로컬만 | `rapid-backend@match119-504015.iam.gserviceaccount.com` — 로컬 ADC(사용자 계정)에서 Signed URL 서명 주체. Cloud Run에서는 비워 둔다(런타임 서비스 계정 자동 사용) |
+
+- 로컬은 `backend/.env`에 위 값을 넣는다(`.gitignore`·`.dockerignore`에 제외돼 있음).
+- 프롬프트는 Firestore `prompts/current`(`template`, `version`)에서 읽는다. 서버가 1분간 캐시하므로
+  수정은 "즉시"가 아니라 **캐시 TTL(1분) 내 반영**된다. 문서가 없거나 못 읽으면 `backend/prompts.py`의
+  내장 기본 프롬프트(`version=builtin`)를 쓴다. 기본 프롬프트 업로드: `python seed_prompt.py <버전>`.
+- 응답 스키마(8필드)는 앱 파싱과 맞물린 계약이라 코드(`backend/prompts.py`)가 소유한다.
 - 로컬 경로(`C:\Users\...` 등)를 코드에 하드코딩하지 않는다 — 컨테이너에서 깨진다.
 - Vertex 모델은 **모델 ID를 명시**한다. `gemini-flash-latest` 같은 별칭은 Developer API 전용이라 Vertex에서 쓰지 않는다.
 
@@ -87,15 +110,29 @@ gcloud auth application-default login
 uvicorn main:app --reload --port 8000
 ```
 
+스모크 테스트 (서버를 띄운 상태에서, 다른 창의 `backend/`에서):
+
+```
+python scripts/smoke_test.py <오디오.m4a|.wav> [--photo 사진.jpg ...] [--duration 초] [--server 주소]
+```
+
+- uploads → PUT → analyze 후 원본 삭제·metrics·prompt_version까지 확인하고, 토큰 없음(401)·1초 녹음도 점검한다.
+- 이 스크립트로 생긴 metrics 기록은 지우지 않는다. `test: true`와 `case`(`normal` / `failure_check`)로
+  실제 기록과 구분하므로, 발표 수치를 집계할 때는 `test == true`를 제외한다.
+
 배포:
 
 ```
 gcloud run deploy rapid-backend --source backend/ --region asia-northeast3 ^
   --service-account=rapid-backend@match119-504015.iam.gserviceaccount.com ^
-  --set-env-vars=PROJECT_ID=match119-504015,REGION=asia-northeast3,BUCKET=rapid-temp-uploads-match119,MODEL=gemini-2.5-flash,VERTEX_LOCATION=asia-northeast3
+  --allow-unauthenticated ^
+  --set-env-vars=PROJECT_ID=match119-504015,REGION=asia-northeast3,BUCKET=rapid-temp-uploads-match119,MODEL=gemini-2.5-flash,VERTEX_LOCATION=asia-northeast1,APP_TOKEN=<공유토큰>
 ```
 
 - `--service-account`를 빼먹으면 권한이 넓은 기본 계정으로 돈다. 반드시 지정.
+- `--allow-unauthenticated`는 앱이 IAM 인증 없이 부르기 때문에 필요하다. 대신 `/api/uploads`·`/api/analyze`는
+  `APP_TOKEN` 공유 토큰(무단 호출 방지용 최소 보호)으로 막는다. `/api/health`만 토큰 없이 열려 있다.
+- `APP_TOKEN` 실제 값은 배포 명령·문서에 적어 커밋하지 않는다. `SIGNER_EMAIL`은 Cloud Run에 넣지 않는다.
 - `min-instances=1`은 시연 당일에만 켠다(무료 한도 소모).
 
 ### 반드시 유지할 기존 안전장치 (PoC에서 실제 문제를 겪고 넣은 것)
@@ -103,7 +140,10 @@ gcloud run deploy rapid-backend --source backend/ --region asia-northeast3 ^
 - 2초 미만 녹음은 모델을 부르지 않고 빈 결과 반환 (`MIN_AUDIO_SECONDS`) — 잡음으로 가짜 응급상황을 지어내는 문제 방지
 - `temperature: 0`, 필드별 독립 판단·언급 없는 필드는 빈 문자열 — 환각 억제
 - 응답 사용량에 AUDIO 토큰이 없으면 경고 로그 — 오디오가 모델에 안 닿고 답을 지어낸 경우 탐지
-- 503(과부하) 최대 2회 재시도, 서버 타임아웃(75s) < 앱 타임아웃(90s)
+- Vertex AI 429(할당량 초과)·503(과부하)는 최대 2회 재시도 — 대기 시간을 두 배씩 늘리고(지터 포함),
+  요청 예산 안에 남은 시간이 있을 때만 재시도한다
+- 요청 전체 예산 75초(업로드 확인·프롬프트 조회·모델 호출, 모델에는 남은 시간만) < 앱 타임아웃(90s).
+  원본 삭제·메타데이터 기록은 예산이 바닥나도 반드시 시도하되 짧은 한도로 묶어 최악 86초
 - onset/last_normal_time은 서버 현재 시각 기준 절대시각 병기
 - 분석 성공·실패와 무관하게 `finally`에서 원본 파일 삭제
 
@@ -115,7 +155,17 @@ gcloud run deploy rapid-backend --source backend/ --region asia-northeast3 ^
 ## 프론트엔드 (Flutter)
 
 - UI는 유지. 서버 통신은 `lib/data/analysis_api.dart`에서만 한다.
-- 백엔드 주소는 `--dart-define=RAPID_API=<주소>` (기본값 `http://127.0.0.1:8000`, USB + `adb reverse tcp:8000 tcp:8000`)
+- 실행 설정은 레포 루트의 `dart_defines.json`에 둔다. `dart_defines.example.json`을 복사해 값을 채운다
+  (`dart_defines.json`은 `.gitignore`에 제외돼 있어 커밋되지 않는다).
+
+  | 키 | 값 |
+  |---|---|
+  | `RAPID_API` | 백엔드 주소. Cloud Run이면 서비스 URL, 로컬 서버면 `http://127.0.0.1:8000`(USB + `adb reverse tcp:8000 tcp:8000`). 비우면 기본값 `http://127.0.0.1:8000` |
+  | `RAPID_TOKEN` | `APP_TOKEN`과 같은 값. `X-RAPID-Token` 헤더로 전송(무단 호출 방지용 최소 보호). 커밋·로그 금지 |
+
+  ```
+  flutter run --dart-define-from-file=dart_defines.json
+  ```
 - 화면만 볼 때: `--dart-define=RAPID_FAKE=true`
 
 ## 용어·표현 규칙 (코드 주석, UI 문구, 문서 모두 적용)
@@ -127,6 +177,10 @@ gcloud run deploy rapid-backend --source backend/ --region asia-northeast3 ^
   예: resumable 업로드를 구현하기 전에는 "이어올리기"를 완료형으로 쓰지 않는다.
   예: GCS 수명 주기 규칙은 "즉시"가 아니라 "누락 대비 1일 경과 후 자동 파기"다.
 - 우리의 GCS 원본 삭제와 Google 측 ZDR 설정은 다른 개념이다. 발표에서는 "원본 즉시 삭제"로 표현.
+- 리전은 **"원본 파일 보관·삭제는 서울 리전, AI 추론은 도쿄 리전"**으로 표현한다.
+  "모든 처리를 서울에서 한다"거나 리전을 뭉뚱그려 말하지 않는다.
+- 공유 토큰(`APP_TOKEN`)은 "보안 인증"이 아니라 **"무단 호출 방지용 최소 보호"**로 쓴다.
+- Firestore 프롬프트 수정은 "즉시 반영"이 아니라 **"캐시 TTL(1분) 내 반영"**으로 쓴다.
 
 ## Git 규칙
 

@@ -51,5 +51,8 @@ const kCmdUpdateResult = 'updateResult';
 /// 서비스 isolate는 본앱의 `String.fromEnvironment` 값을 볼 수 없다.
 const kApiBaseUrl = 'apiBaseUrl';
 
+/// 공유 토큰(`X-RAPID-Token`)도 서버 주소와 같은 이유·방식으로 넘긴다.
+const kApiToken = 'apiToken';
+
 Map<String, Object?> cmd(String name, [Map<String, Object?> extra = const {}]) =>
     {kCmd: name, ...extra};

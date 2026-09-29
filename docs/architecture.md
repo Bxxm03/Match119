@@ -8,6 +8,7 @@
 > - Lifecycle 정책의 최소 단위는 1일이다. "즉시 파기"는 Cloud Run의 삭제 호출에만 해당한다.
 > - "처리 소요 시간 18초", "지연 시간 0에 가깝게", "4분을 18초로" 등은 **기획 단계의 예시·목표치이며 실측값이 아니다.** 실측 전에는 코드·문서·발표에서 완료형으로 쓰지 않는다.
 > - 우리의 GCS 원본 삭제와 Google 측 Zero Data Retention(ZDR) 설정은 별개 개념이다.
+> - **AI 추론(Vertex AI)은 도쿄 리전(`asia-northeast1`)**에서 한다. 원본 파일 보관·삭제(Cloud Storage)와 Firestore·Cloud Run은 서울 리전. 서울 리전 공유 용량 부족으로 2026-09-28 전환(근거는 CLAUDE.md).
 
 ## Step 1: 현장 고지 및 데이터 라우팅 (프론트엔드 - Flutter)
 
