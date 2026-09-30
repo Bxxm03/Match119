@@ -183,7 +183,18 @@ class RecordingTaskHandler extends TaskHandler {
     try {
       // 기본 인코더가 AAC다. WAV는 파일이 10배 커져 불안정한 구급차 네트워크로
       // 올리기에 불리하다.
-      await _recorder.start(const RecordConfig(), path: path);
+      //
+      // audioInterruption 기본값(pause)은 다른 앱이 오디오 포커스를 가져가면
+      // 녹음을 멈추고 자동으로 재개하지 않는다 — 경과 시간은 계속 올라가서
+      // 화면에는 정상으로 보인다. manageBluetooth 기본값(true)은 마이크 달린
+      // 블루투스 기기가 연결돼 있으면 그쪽 마이크로 녹음한다.
+      await _recorder.start(
+        const RecordConfig(
+          audioInterruption: AudioInterruptionMode.none,
+          androidConfig: AndroidRecordConfig(manageBluetooth: false),
+        ),
+        path: path,
+      );
     } catch (e) {
       _error = '녹음을 시작할 수 없습니다: $e';
       _broadcast();

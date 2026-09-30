@@ -128,7 +128,16 @@ class LocalAssistantController implements AssistantController {
     try {
       // 기본 인코더가 AAC다. WAV는 파일이 10배 커져서 불안정한 구급차
       // 네트워크로 올리기에 불리하다.
-      await _recorder.start(const RecordConfig(), path: path);
+      //
+      // audioInterruption·manageBluetooth는 recording_service.dart와 같은
+      // 이유로 기본값을 쓰지 않는다.
+      await _recorder.start(
+        const RecordConfig(
+          audioInterruption: AudioInterruptionMode.none,
+          androidConfig: AndroidRecordConfig(manageBluetooth: false),
+        ),
+        path: path,
+      );
     } catch (e) {
       _emit(_state.copyWith(error: '녹음을 시작할 수 없습니다: $e'));
       return;
