@@ -76,6 +76,11 @@ except ValueError:
 if THINKING_BUDGET < 0:
     # -1(모델이 알아서 정함)은 한도를 알 수 없어 max_output_tokens를 다 쓸 수 있다.
     raise SystemExit("THINKING_BUDGET은 0 이상이어야 합니다")
+# 프롬프트 출처. 비우면 firestore(운영값)이고, builtin이면 Firestore를 읽지 않고
+# 내장 기본 프롬프트만 쓴다 — 프롬프트 비교 실험할 때만 바꾼다.
+PROMPT_SOURCE = os.environ.get("PROMPT_SOURCE", "").strip() or "firestore"
+if PROMPT_SOURCE not in ("firestore", "builtin"):
+    raise SystemExit("PROMPT_SOURCE는 firestore 또는 builtin이어야 합니다")
 
 # onset 절대시각 계산용. Cloud Run은 UTC로 돌기 때문에 시간대를 명시해야 한다.
 KST = ZoneInfo("Asia/Seoul")
@@ -289,6 +294,8 @@ async def _load_prompt(deadline: float) -> tuple[str, str]:
     대신하고 버전을 "builtin"으로 남긴다. 이때는 10초만 캐시한다.
     """
     global _prompt_cache
+    if PROMPT_SOURCE == "builtin":
+        return DEFAULT_PROMPT_TEMPLATE, DEFAULT_PROMPT_VERSION
     now = time.monotonic()
     if _prompt_cache and now < _prompt_cache[0]:
         return _prompt_cache[1], _prompt_cache[2]
