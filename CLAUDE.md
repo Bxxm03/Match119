@@ -90,6 +90,7 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 | `VERTEX_LOCATION` | ✔ | `asia-northeast1`(도쿄) — Vertex AI 호출 리전. `REGION`과 분리해서, 비상 전환 시 코드 수정 없이 `VERTEX_LOCATION`과 `MODEL`만 바꿔 재배포한다. `global`이면 기동 거부 |
 | `APP_TOKEN` | ✔ | 앱과 공유하는 토큰(`X-RAPID-Token` 헤더). **무단 호출 방지용 최소 보호**이지 보안 인증이 아니다(APK에서 추출 가능). 커밋 금지 |
 | `SIGNER_EMAIL` | 로컬만 | `rapid-backend@match119-504015.iam.gserviceaccount.com` — 로컬 ADC(사용자 계정)에서 Signed URL 서명 주체. Cloud Run에서는 비워 둔다(런타임 서비스 계정 자동 사용) |
+| `THINKING_BUDGET` | | 모델 thinking 토큰 한도. 비우면 `0`(끔, 운영값). 비교 실험할 때만 바꾸고, 값은 metrics `thinking_budget`에 기록된다 |
 
 - 로컬은 `backend/.env`에 위 값을 넣는다(`.gitignore`·`.dockerignore`에 제외돼 있음).
 - 프롬프트는 Firestore `prompts/current`(`template`, `version`)에서 읽는다. 서버가 1분간 캐시하므로

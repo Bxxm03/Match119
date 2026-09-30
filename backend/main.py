@@ -68,6 +68,14 @@ APP_TOKEN = _require_env("APP_TOKEN")
 # Signed URL 서명 주체. Cloud Run에서는 런타임 서비스 계정이 자동으로 잡히므로
 # 비워 두고, 로컬(사용자 계정 ADC)에서만 rapid-backend 서비스 계정을 적는다.
 SIGNER_EMAIL = os.environ.get("SIGNER_EMAIL", "").strip()
+# 모델 thinking 토큰 한도. 기본 0(끔)이 운영값이고, 비교 실험할 때만 바꾼다.
+try:
+    THINKING_BUDGET = int(os.environ.get("THINKING_BUDGET", "").strip() or 0)
+except ValueError:
+    raise SystemExit("환경변수 THINKING_BUDGET은 정수여야 합니다")
+if THINKING_BUDGET < 0:
+    # -1(모델이 알아서 정함)은 한도를 알 수 없어 max_output_tokens를 다 쓸 수 있다.
+    raise SystemExit("THINKING_BUDGET은 0 이상이어야 합니다")
 
 # onset 절대시각 계산용. Cloud Run은 UTC로 돌기 때문에 시간대를 명시해야 한다.
 KST = ZoneInfo("Asia/Seoul")
@@ -114,7 +122,7 @@ GENERATION_CONFIG = types.GenerateContentConfig(
     temperature=0,
     # 대화 듣고 정해진 스키마 채우는 작업이라 추론이 필요 없다. thinking을 켜 두면
     # max_output_tokens가 thinking에 먼저 소모되어 MAX_TOKENS로 빈 응답이 나올 수 있다.
-    thinking_config=types.ThinkingConfig(thinking_budget=0),
+    thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET),
     response_mime_type="application/json",
     response_schema=RESPONSE_SCHEMA,
     # 8필드 한국어 + reasons 배열이 여유 있게 들어가는 크기.
@@ -528,6 +536,7 @@ async def _analyze_session(req: AnalyzeRequest, metrics: dict, deadline: float) 
         d.token_count or 0 for d in details if d.modality == types.MediaModality.AUDIO
     )
     metrics["audio_tokens"] = audio_tokens
+    metrics["thoughts_tokens"] = (usage.thoughts_token_count if usage else None) or 0
     modalities = {d.modality.value if d.modality else None: d.token_count for d in details}
     print(f"[analyze] usage={modalities}")
     if not audio_tokens:
@@ -568,6 +577,8 @@ async def analyze(req: AnalyzeRequest):
         "skipped": None,
         "model": MODEL,
         "vertex_location": VERTEX_LOCATION,
+        "thinking_budget": THINKING_BUDGET,
+        "thoughts_tokens": None,  # 모델이 실제로 thinking에 쓴 토큰
         "prompt_version": None,
         "prompt_missing_now": None,  # 프롬프트에 {now}가 없어 현재 시각이 안 들어갔으면 True
         "duration_seconds": None,
