@@ -91,12 +91,15 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 | `APP_TOKEN` | ✔ | 앱과 공유하는 토큰(`X-RAPID-Token` 헤더). **무단 호출 방지용 최소 보호**이지 보안 인증이 아니다(APK에서 추출 가능). 커밋 금지 |
 | `SIGNER_EMAIL` | 로컬만 | `rapid-backend@match119-504015.iam.gserviceaccount.com` — 로컬 ADC(사용자 계정)에서 Signed URL 서명 주체. Cloud Run에서는 비워 둔다(런타임 서비스 계정 자동 사용) |
 | `THINKING_BUDGET` | | 모델 thinking 토큰 한도. 비우면 `0`(끔, 운영값). 비교 실험할 때만 바꾸고, 값은 metrics `thinking_budget`에 기록된다 |
+| `PROMPT_SOURCE` | | 프롬프트 출처. 비우면 `firestore`(운영값). `builtin`이면 Firestore를 읽지 않고 `prompts.py`의 내장 기본 프롬프트(`version=builtin`)만 쓴다. 로컬 비교 실험용 — Cloud Run에는 설정하지 않는다 |
+| `PROMPT_DOC` | | Firestore `prompts` 컬렉션에서 읽을 문서 이름. 비우면 `current`(운영값). 초안 문서(예: `draft`)를 운영 문서 건드리지 않고 시험할 때만 바꾼다(`/` 불가). `PROMPT_SOURCE=builtin`이면 무시. Cloud Run에는 설정하지 않는다 |
 
 - 로컬은 `backend/.env`에 위 값을 넣는다(`.gitignore`·`.dockerignore`에 제외돼 있음).
 - 프롬프트는 Firestore `prompts/current`(`template`, `version`)에서 읽는다. 서버가 1분간 캐시하므로
   수정은 "즉시"가 아니라 **캐시 TTL(1분) 내 반영**된다. 문서가 없거나 못 읽으면 `backend/prompts.py`의
   내장 기본 프롬프트(`version=builtin`)를 쓴다. 기본 프롬프트 업로드: `python seed_prompt.py <버전>`.
 - 응답 스키마(8필드)는 앱 파싱과 맞물린 계약이라 코드(`backend/prompts.py`)가 소유한다.
+  칸 설명을 고칠 때는 `prompts.py`의 `SCHEMA_VERSION`을 올린다 — metrics `schema_version`에 기록된다.
 - 로컬 경로(`C:\Users\...` 등)를 코드에 하드코딩하지 않는다 — 컨테이너에서 깨진다.
 - Vertex 모델은 **모델 ID를 명시**한다. `gemini-flash-latest` 같은 별칭은 Developer API 전용이라 Vertex에서 쓰지 않는다.
 

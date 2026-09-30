@@ -34,6 +34,7 @@ from prompts import (
     DEFAULT_PROMPT_VERSION,
     EMPTY_RESULT,
     RESPONSE_SCHEMA,
+    SCHEMA_VERSION,
 )
 
 # 이보다 짧은 녹음은 Gemini를 부르지 않는다 — 대화라 부를 만한 게 담기기엔
@@ -592,6 +593,7 @@ async def analyze(req: AnalyzeRequest):
         "thinking_budget": THINKING_BUDGET,
         "thoughts_tokens": None,  # 모델이 실제로 thinking에 쓴 토큰
         "prompt_version": None,
+        "schema_version": SCHEMA_VERSION,  # 코드가 소유한 칸 설명의 버전
         "prompt_missing_now": None,  # 프롬프트에 {now}가 없어 현재 시각이 안 들어갔으면 True
         "duration_seconds": None,
         "audio_bytes": None,

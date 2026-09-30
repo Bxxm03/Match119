@@ -31,6 +31,10 @@ DEFAULT_PROMPT_TEMPLATE = """다음 오디오는 구급대원과 환자(또는 �
 절대로 그럴듯한 상황을 지어내지 마라 — 그런 경우 모든 필드를 빈 문자열(reasons는
 빈 배열)로 남겨라."""
 
+# 아래 _FIELDS(칸 설명)의 버전. 칸 설명은 Firestore 프롬프트(prompt_version)와 달리 코드가
+# 소유하므로, 어느 설명으로 분석했는지 metrics에 남기려고 칸 설명을 고칠 때마다 올린다.
+SCHEMA_VERSION = "2026-10-01e"
+
 
 def _text(description: str) -> types.Schema:
     return types.Schema(type=types.Type.STRING, description=description)
