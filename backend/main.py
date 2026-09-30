@@ -81,6 +81,11 @@ if THINKING_BUDGET < 0:
 PROMPT_SOURCE = os.environ.get("PROMPT_SOURCE", "").strip() or "firestore"
 if PROMPT_SOURCE not in ("firestore", "builtin"):
     raise SystemExit("PROMPT_SOURCE는 firestore 또는 builtin이어야 합니다")
+# Firestore prompts 컬렉션에서 읽을 문서 이름. 비우면 current(운영값)이고, 초안 문서를
+# 시험할 때만 바꾼다. PROMPT_SOURCE=builtin이면 쓰이지 않는다.
+PROMPT_DOC = os.environ.get("PROMPT_DOC", "").strip() or "current"
+if "/" in PROMPT_DOC:
+    raise SystemExit("PROMPT_DOC은 문서 이름만 적습니다(경로 구분자 / 불가)")
 
 # onset 절대시각 계산용. Cloud Run은 UTC로 돌기 때문에 시간대를 명시해야 한다.
 KST = ZoneInfo("Asia/Seoul")
@@ -288,7 +293,7 @@ _prompt_cache: tuple[float, str, str] | None = None
 
 
 async def _load_prompt(deadline: float) -> tuple[str, str]:
-    """Firestore prompts/current에서 (템플릿, 버전)을 읽는다. 1분간 캐시한다.
+    """Firestore prompts/{PROMPT_DOC}(기본 current)에서 (템플릿, 버전)을 읽는다. 1분간 캐시한다.
 
     Firestore를 못 읽어도 분석 자체가 멈추면 안 되므로 내장 기본 프롬프트로
     대신하고 버전을 "builtin"으로 남긴다. 이때는 10초만 캐시한다.
@@ -306,7 +311,7 @@ async def _load_prompt(deadline: float) -> tuple[str, str]:
     try:
         # 라이브러리 자동 재시도는 끄고, 한도를 넘기면 기본 프롬프트로 넘어간다.
         snap = await asyncio.wait_for(
-            firestore_client.collection("prompts").document("current").get(
+            firestore_client.collection("prompts").document(PROMPT_DOC).get(
                 timeout=timeout, retry=None
             ),
             timeout=timeout,
@@ -316,7 +321,7 @@ async def _load_prompt(deadline: float) -> tuple[str, str]:
             template = data["template"]
             version = str(data.get("version", "unknown"))
         else:
-            print("[prompt] 경고: prompts/current 문서가 없어 내장 기본 프롬프트를 쓴다")
+            print(f"[prompt] 경고: prompts/{PROMPT_DOC} 문서가 없어 내장 기본 프롬프트를 쓴다")
     except Exception as e:
         ttl = PROMPT_FALLBACK_CACHE_SECONDS
         print(f"[prompt] 경고: Firestore 조회 실패, 내장 기본 프롬프트를 {ttl}초간 쓴다: {e!r}")
