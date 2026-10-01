@@ -47,7 +47,7 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 
 | 항목 | 값 |
 |---|---|
-| 사용 모델 | `gemini-3.5-flash` (GA) — `gemini-2.5-flash`에서 전환(`feature/gemini35-flash`) |
+| 사용 모델 | `gemini-3.5-flash` (GA) — 2026-10-02 `gemini-2.5-flash`에서 운영 전환(리비전 `rapid-backend-g35-2567176`) |
 | Vertex 호출 리전 | `asia-northeast1` (도쿄) — 2026-09-28 서울에서 전환 |
 | 모델 종료(retirement) 예정일 | **2027-05-19 이후** (이전 모델 `gemini-2.5-flash`는 **2026-10-20**) |
 | thinking 설정 | `thinking_level=MINIMAL` (Gemini 3 계열은 thinking을 끌 수 없음, MINIMAL이 최소) |
@@ -57,11 +57,12 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 
 ### 롤백 (3.5 → 2.5)
 
-- 코드 수정 없이 Cloud Run 환경변수 `MODEL=gemini-2.5-flash`로만 바꿔 재배포하면 된다.
+- 기본: 2.5 리비전(`rapid-backend-00002-djk`, 지우지 않고 남겨 둠)으로 트래픽을 되돌린다.
+  `gcloud run services update-traffic rapid-backend --region asia-northeast3 --project match119-504015 --to-revisions=rapid-backend-00002-djk=100`
+- 또는 코드 수정 없이 `--update-env-vars=MODEL=gemini-2.5-flash`로 재배포한 뒤 그 리비전으로 트래픽을 옮긴다.
   코드가 모델 이름을 보고 thinking 방식을 고른다(2.5는 `thinking_budget=0`, Gemini 3 계열은 `thinking_level`).
   모델에 맞지 않는 쪽 환경변수(`THINKING_LEVEL`·`THINKING_BUDGET`)가 남아 있어도 기동을 막지 않고 무시한다.
-- 또는 이전 리비전으로 트래픽만 되돌린다(`gcloud run services update-traffic`).
-- **2.5로 롤백할 수 있는 기한은 2026-10-20(2.5 종료일)까지다.**
+- **2.5로 롤백할 수 있는 기한은 2026-10-20(2.5 종료일, 공식 문서 기준)까지다.**
 
 ### 서울 → 도쿄 전환 근거 (2026-09-28, 자체 측정)
 
@@ -134,7 +135,7 @@ python scripts/smoke_test.py <오디오.m4a|.wav> [--photo 사진.jpg ...] [--du
 - 이 스크립트로 생긴 metrics 기록은 지우지 않는다. `test: true`와 `case`(`normal` / `failure_check`)로
   실제 기록과 구분하므로, 발표 수치를 집계할 때는 `test == true`를 제외한다.
 
-배포:
+처음 배포(서비스를 새로 만들 때만):
 
 ```
 gcloud run deploy rapid-backend --source backend/ --region asia-northeast3 ^
@@ -148,6 +149,15 @@ gcloud run deploy rapid-backend --source backend/ --region asia-northeast3 ^
   `APP_TOKEN` 공유 토큰(무단 호출 방지용 최소 보호)으로 막는다. `/api/health`만 토큰 없이 열려 있다.
 - `APP_TOKEN` 실제 값은 배포 명령·문서에 적어 커밋하지 않는다. `SIGNER_EMAIL`은 Cloud Run에 넣지 않는다.
 - `min-instances=1`은 시연 당일에만 켠다(무료 한도 소모).
+
+이후 배포(2026-10-02부터 쓰는 방식 — 기존 서비스 갱신):
+
+- `--set-env-vars`는 쓰지 않는다(목록에 없는 변수가 지워짐). 바꿀 변수만 `--update-env-vars`로 넘긴다.
+- 커밋을 고정해서 올린다: `git archive <커밋> backend`를 임시 폴더에 풀고 그 폴더를 `--source`로 쓴다(작업 트리 파일이 섞이지 않게).
+  올리기 전에 임시 폴더에 `.env`·`dart_defines.json`·녹음 파일이 없는지 확인한다.
+- `--revision-suffix=<이름> --tag=<태그> --no-traffic`으로 먼저 올리고, 태그 URL로 확인한 뒤
+  `gcloud run services update-traffic … --to-revisions=<새 리비전>=100`으로 옮긴다.
+- 트래픽이 리비전 고정 방식이라 **새 리비전은 배포만으로는 트래픽을 받지 않는다** — 반드시 `update-traffic`까지 한다.
 
 ### 반드시 유지할 기존 안전장치 (PoC에서 실제 문제를 겪고 넣은 것)
 

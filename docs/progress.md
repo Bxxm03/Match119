@@ -15,7 +15,9 @@
 - **배포 URL로 스모크 테스트 15/15 통과** (`Scenario.m4a` 74초).
 - **실기기 테스트 9개 항목 통과 (2026-09-30, S25 Ultra 디버그)** — 아래 "실기기 테스트" 참고.
 - **모델을 `gemini-3.5-flash`(도쿄, `thinking_level=MINIMAL`)로 바꾸는 코드·문서 작업 (`feature/gemini35-flash`)** —
-  2.5 vs 3.5 비교와 thinking 설정 차이는 아래 "모델 전환: 2.5-flash → 3.5-flash". **Cloud Run 배포는 아직 안 함.**
+  2.5 vs 3.5 비교와 thinking 설정 차이는 아래 "모델 전환: 2.5-flash → 3.5-flash".
+- **2026-10-02 운영 모델을 `gemini-3.5-flash`(도쿄, `thinking_level=MINIMAL`)로 전환** — 리비전 `rapid-backend-g35-2567176`,
+  트래픽 100%. 롤백 명령은 아래 "모델 전환 → 운영 전환과 롤백".
 
 ### 바로 다음 할 일
 
@@ -141,8 +143,8 @@ PoC(Gemini Developer API 키 + Files API + multipart 업로드)를 CLAUDE.md 목
 
 ### 남은 일
 
-- `gemini-2.5-flash`는 **2026-10-20 종료**. → 도쿄 `gemini-3.5-flash` 전환 작업 진행 중(아래 "모델 전환" 참고).
-  이번 전환에서는 모델 효과만 보려고 프롬프트(`prompts/current` = `2026-10-01b`)는 바꾸지 않는다.
+- `gemini-2.5-flash`는 **2026-10-20 종료**. → 2026-10-02 도쿄 `gemini-3.5-flash`로 운영 전환 완료(아래 "모델 전환" 참고).
+  전환에서는 모델 효과만 보려고 프롬프트(`prompts/current` = `2026-10-01b`)는 바꾸지 않았다.
 
 ### 배포 후 확인 필요
 
@@ -170,29 +172,59 @@ PoC(Gemini Developer API 키 + Files API + multipart 업로드)를 CLAUDE.md 목
 - 3.5 + MINIMAL로 보낸 50건 모두 `finish_reason=STOP`, `thoughts_tokens=0`, MAX_TOKENS 0건 (`max_output_tokens=4096` 유지).
 - metrics에 `thinking_mode`(`level`/`budget`), `thinking_level`, `thinking_budget`, `thoughts_tokens`, `model`을 기록한다.
 
-### 비교 (test-audio 20개 × 조용/사이렌 SNR 0dB, 케이스당 1회, 프롬프트 `2026-10-01b`·스키마 `2026-10-01e`)
+### 운영 전환과 롤백 (2026-10-02)
 
-| 조건 | 결과 폴더 (`test-audio/results/`) | 누락율(부정 응답 포함) | 환각 건수 | 환각율(보정 분모) | 환각 발생 케이스 | 추론 평균/최대 |
-|---|---|---|---|---|---|---|
-| 2.5 조용 (운영 Cloud Run) | `eval-20261001-2200-audio` | 11.8% | 6 | 2.9% | 6/20 | 4.1s / 5.5s |
-| 2.5 사이렌 (운영 Cloud Run) | `eval-20261001-2229-complex` | 18.0% | 32 | 16.2% | 15/20 | 4.1s / 5.3s |
-| 3.5 조용 (로컬, MINIMAL) | `eval-20261001-2331-35flash-audio` | 3.9% | 8 | 3.7% | 7/20 | 3.9s / 5.3s |
-| 3.5 사이렌 (로컬, MINIMAL) | `eval-20261001-2334-35flash-complex` | 10.1% | 15 | 7.3% | 8/20 | 4.9s / 10.1s |
+- 운영 모델을 `gemini-3.5-flash`(도쿄 `asia-northeast1`, `thinking_level=MINIMAL`)로 전환. 리비전 `rapid-backend-g35-2567176`
+  (커밋 `2567176`), 트래픽 100%. 환경변수는 `--update-env-vars=MODEL=gemini-3.5-flash`로 MODEL만 바꿨다(이름 6개 그대로).
+- 배포 방식: `git archive 2567176 backend` → 임시 폴더 → `gcloud run deploy --source … --revision-suffix=g35-2567176 --tag=g35 --no-traffic`
+  → 태그 URL(`https://g35---rapid-backend-mletd6i25q-du.a.run.app`)로 확인 → `update-traffic --to-revisions=…=100`.
+  트래픽이 리비전 고정 방식이 되어, **다음 배포의 새 리비전은 자동으로 트래픽을 받지 않는다**(배포 후 `update-traffic` 필요).
+- **롤백 명령** (이전 리비전 `rapid-backend-00002-djk` = 2.5-flash, 지우지 않고 남겨 둠):
 
-- 전체 보고서: `eval-20261001-2334-35flash-complex/_compare4.md` (묶음별·케이스별 표, 판정 근거는 각 폴더 `_scoring.md`).
+  ```
+  gcloud run services update-traffic rapid-backend --region asia-northeast3 --project match119-504015 --to-revisions=rapid-backend-00002-djk=100
+  ```
+
+- **롤백 가능 기간: 2026-10-20까지** — 공식 문서의 `gemini-2.5-flash` 종료일(Retirement date: October 20, 2026,
+  권장 대체 모델 gemini-3.8-flash / 3.5-flash-lite / 3.1-flash-lite). 이후엔 2.5 리비전으로 되돌려도 모델 호출이 실패한다.
+  https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions
+  (`gemini-3.5-flash` 종료일은 2027-05-19 이후)
+
+### 평가 요약
+
+**자체 측정, 팀 역할극 녹음(test-audio), n=20, 사이렌은 합성(SNR 0dB). 케이스당 1회씩**, 프롬프트 `2026-10-01b`·스키마 `2026-10-01e`.
+
+| 조건 | 결과 폴더 (`test-audio/results/`) | 누락율(부정 응답 포함) | 환각 건수 | 환각율(보정 분모) | 추론 평균/최대 |
+|---|---|---|---|---|---|
+| 2.5 조용 (운영 Cloud Run) | `eval-20261001-2200-audio` | 11.8% | 6 | 2.9% | 4.1s / 5.5s |
+| 2.5 사이렌 (운영 Cloud Run) | `eval-20261001-2229-complex` | 18.0% | 32 | 16.2% | 4.1s / 5.3s |
+| 3.5 조용 (로컬 1회차) | `eval-20261001-2331-35flash-audio` | 3.9% | 8 | 3.7% | 3.9s / 5.3s |
+| 3.5 사이렌 (로컬 1회차) | `eval-20261001-2334-35flash-complex` | 10.1% | 15 | 7.3% | 4.9s / 10.1s |
+| 3.5 조용 (운영 2회차) | `eval-20261002-0050-35flash-prod-audio` | 4.4% | 6 | 2.8% | 6.3s / 11.6s |
+| 3.5 사이렌 (운영 2회차) | `eval-20261002-0053-35flash-prod-complex` | 11.0% | 14 | 7.0% | 6.5s / 16.7s |
+
+- 보고서: 1회차 `eval-20261001-2334-35flash-complex/_compare4.md`, 2회차 `eval-20261002-0053-35flash-prod-complex/_compare_prod35.md`
+  (묶음별·케이스별 표, 판정 근거는 각 폴더 `_scoring.md`). 3.5 두 회차의 사실별 판정 일치율은 조용 94.7%, 사이렌 92.5%.
+- 점검용 폴더: `eval-20261002-0042-35flash-feature-check-*`, `eval-20261002-0042-25flash-rollback-check-audio`,
+  `eval-20261002-0048-35flash-prod-tagcheck-*`, `eval-20261002-0048-25flash-prod-stillcheck-audio`, `eval-20261002-0049-35flash-prod-aftershift-audio`.
+- **이 측정들로 생긴 metrics는 모두 `test: true`(+ `eval_run`)라 운영 집계에서 제외한다.**
 - 보정 분모: 3.5는 기타 칸을 마침표 문장으로 써서, 쉼표로만 나누는 기존 분모로는 환각율이 부풀려진다(기존 분모 기준
   3.5 사이렌 10.6%). 4조건 모두 문장 마침표로도 나눈 분모로 다시 계산한 값.
 - 사이렌으로 늘어난 환각: 2.5 +26건, 3.5 +7건 — **3.5가 소음에 덜 흔들렸다.** 누락 증가 폭은 둘 다 +6.1%p로 같다.
 - 3.5에 남은 위험: 약·병원 이름을 비슷한 소리의 다른 값으로 바꿔 적음(s8 혈압약→당뇨약, s10 갑상선약→전립선약,
   s13 지어낸 약 이름), s17 "오늘 10시부터 심해짐"(조용·사이렌 모두), AI 의심소견을 진단명 수준으로 적음(s19 "뇌졸중"),
   보호자 칸을 덜 채움.
-- 한계: 케이스당 1회, 채점자가 조건을 알고 채점, 2.5는 운영 Cloud Run·3.5는 로컬 서버(추론 시간만 비교 가능),
+- 한계: 케이스당 1회씩(3.5는 2회), 채점자가 조건을 알고 채점, 3.5 1회차는 로컬 서버라 처리시간은 운영과 직접 비교 어려움,
   s19 사실 6(토함 1번)은 받아쓰기 재확인과 정답지가 엇갈림.
+- 다른 롤백 방법: 리비전 대신 `MODEL=gemini-2.5-flash`로 재배포해도 된다(코드가 thinking 방식을 자동으로 고름). 기한은 같다.
 
-### 롤백
+### 남은 문제 (3.5 운영)
 
-- Cloud Run 환경변수 `MODEL=gemini-2.5-flash`로 재배포(코드 수정 없음) 또는 이전 리비전으로 트래픽 되돌리기.
-  2.5 종료일(2026-10-20)까지만 가능.
+- **추론 시간 증가**: 운영 2회차 평균 6.3~6.5초, 최대 16.7초(사이렌 s17). 2.5 운영(평균 4.1초, 최대 5.5초)·3.5 로컬 1회차보다 길다.
+  75초 예산 안이지만 운영 metrics `timings_ms.inference`를 모아 추이를 볼 것(원인 미확인).
+- **s13 사이렌 "복용약 없음" 재발**: 빈혈약을 먹는 실신 환자를 "복용약 없음"으로 적음 — 2.5 사이렌과 같은 위험한 오류가 운영 2회차에서 다시 나옴.
+- **진단명 수준 의심소견**: s1 사이렌 "급성 관상동맥 증후군", s19 "뇌졸중"(두 회차·두 조건 모두) — "의심 질환군 1차 분류 보조" 범위를 넘음.
+  프롬프트 보강(질환군 수준으로 묶기)은 모델 효과와 섞이지 않게 따로 진행한다.
 
 ## 실기기 테스트 (2026-09-30, Galaxy S25 Ultra, 디버그 빌드)
 
