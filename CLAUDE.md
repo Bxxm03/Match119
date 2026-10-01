@@ -47,13 +47,21 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 
 | 항목 | 값 |
 |---|---|
-| 사용 모델 | `gemini-2.5-flash` (GA) |
+| 사용 모델 | `gemini-3.5-flash` (GA) — `gemini-2.5-flash`에서 전환(`feature/gemini35-flash`) |
 | Vertex 호출 리전 | `asia-northeast1` (도쿄) — 2026-09-28 서울에서 전환 |
-| 모델 종료(retirement) 예정일 | **2026-10-20** |
+| 모델 종료(retirement) 예정일 | **2027-05-19 이후** (이전 모델 `gemini-2.5-flash`는 **2026-10-20**) |
+| thinking 설정 | `thinking_level=MINIMAL` (Gemini 3 계열은 thinking을 끌 수 없음, MINIMAL이 최소) |
 
-- 대회 일정(~2026-10-07)이 종료일보다 앞서 지금은 문제없지만,
-  **10/7 이후에도 시연이 필요하면 종료일(2026-10-20) 전에 반드시 도쿄 `gemini-3.5-flash`로 전환한다**
-  (아래 "10/20 이후 대안").
+- 서울(`asia-northeast3`)에는 `gemini-3.5-flash`가 제공되지 않는다(공식 문서 기준, 도쿄는 제공).
+- 2.5 vs 3.5 비교(자체 측정, 케이스당 1회)는 `docs/progress.md` "모델 전환: 2.5-flash → 3.5-flash" 참고.
+
+### 롤백 (3.5 → 2.5)
+
+- 코드 수정 없이 Cloud Run 환경변수 `MODEL=gemini-2.5-flash`로만 바꿔 재배포하면 된다.
+  코드가 모델 이름을 보고 thinking 방식을 고른다(2.5는 `thinking_budget=0`, Gemini 3 계열은 `thinking_level`).
+  모델에 맞지 않는 쪽 환경변수(`THINKING_LEVEL`·`THINKING_BUDGET`)가 남아 있어도 기동을 막지 않고 무시한다.
+- 또는 이전 리비전으로 트래픽만 되돌린다(`gcloud run services update-traffic`).
+- **2.5로 롤백할 수 있는 기한은 2026-10-20(2.5 종료일)까지다.**
 
 ### 서울 → 도쿄 전환 근거 (2026-09-28, 자체 측정)
 
@@ -61,16 +69,17 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
   4회(약 22분, 16:40~17:03), HTTP 호출 12번 모두 429. 429 하나에 6~9초씩 걸려 요청마다 24~29초 뒤 실패.
 - 콘솔 할당량 화면의 서울 사용률은 **0.05%** — 우리 할당량 문제가 아니라 리전 공유 용량 부족(조정 불가 시스템 한도)으로 판단.
 
-### 10/20 이후 대안
+### 다른 모델 후보 (2026-10-01~02 확인)
 
-- `gemini-3.5-flash` + `asia-northeast1`(도쿄) — 위 A/B 시험으로 실호출·스키마 검증 완료, 종료일 2027-05-19 이후.
-  `MODEL`만 바꿔 재배포하면 된다. 다만 시험에서 보호자 칸에 대화에 없는 내용을 적은 적이 있으므로,
-  전환 전에 프롬프트 보강 후 다시 채점한다.
+- `gemini-3.8-flash`는 도쿄·서울 미제공(404) — global·us·eu만 제공되어 쓰지 않는다.
 - **`global` 엔드포인트는 사용 금지.** 처리 리전을 보장하지 않아 "특정 리전에서 처리한다"고 말할 수 없게 된다.
 
 ### 모델 호출 시 주의사항 (검증 중 발견)
 
-- `thinkingConfig.thinkingBudget: 0`을 유지한다. thinking을 켜 두면 `maxOutputTokens`가 thinking에
+- thinking은 최소로 둔다 — 2.5 계열은 `thinkingBudget: 0`, Gemini 3 계열은 `thinkingLevel: MINIMAL`.
+  Gemini 3 계열에 `thinkingBudget`을 보내면 안 된다(3.5-flash 오디오 요청에서 간헐적 400 "Thinking budget is not
+  supported for this model", 2026-10-01 자체 측정). 실제로 보낸 값과 thinking 토큰은 metrics `thinking_mode`·
+  `thinking_level`·`thinking_budget`·`thoughts_tokens`에 기록된다. thinking을 켜 두면 `maxOutputTokens`가 thinking에
   먼저 소모되어 `finishReason: MAX_TOKENS`로 빈 응답이 나올 수 있다 — `maxOutputTokens`는 응답 스키마
   전체가 들어갈 만큼 넉넉히 잡을 것.
 - 0.1초짜리 무음 오디오를 넣어도 모델이 소리를 지어냈다(모델마다 다른 내용). `MIN_AUDIO_SECONDS`
@@ -86,11 +95,12 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 | `PROJECT_ID` | ✔ | `match119-504015` |
 | `REGION` | ✔ | `asia-northeast3` — 버킷·Firestore·Cloud Run 리전 |
 | `BUCKET` | ✔ | `rapid-temp-uploads-match119` |
-| `MODEL` | ✔ | `gemini-2.5-flash` — 별칭 금지, 모델 ID 그대로 |
+| `MODEL` | ✔ | `gemini-3.5-flash` — 별칭 금지, 모델 ID 그대로. 롤백은 `gemini-2.5-flash`(2026-10-20까지). 코드에 기본값 없음 |
 | `VERTEX_LOCATION` | ✔ | `asia-northeast1`(도쿄) — Vertex AI 호출 리전. `REGION`과 분리해서, 비상 전환 시 코드 수정 없이 `VERTEX_LOCATION`과 `MODEL`만 바꿔 재배포한다. `global`이면 기동 거부 |
 | `APP_TOKEN` | ✔ | 앱과 공유하는 토큰(`X-RAPID-Token` 헤더). **무단 호출 방지용 최소 보호**이지 보안 인증이 아니다(APK에서 추출 가능). 커밋 금지 |
 | `SIGNER_EMAIL` | 로컬만 | `rapid-backend@match119-504015.iam.gserviceaccount.com` — 로컬 ADC(사용자 계정)에서 Signed URL 서명 주체. Cloud Run에서는 비워 둔다(런타임 서비스 계정 자동 사용) |
-| `THINKING_BUDGET` | | 모델 thinking 토큰 한도. 비우면 `0`(끔, 운영값). 비교 실험할 때만 바꾸고, 값은 metrics `thinking_budget`에 기록된다 |
+| `THINKING_BUDGET` | | **2.5 계열 전용** thinking 토큰 한도. 비우면 `0`(끔, 운영값). 비교 실험할 때만 바꾸고, 값은 metrics `thinking_budget`에 기록된다. Gemini 3 계열에서는 무시 |
+| `THINKING_LEVEL` | | **Gemini 3 계열 전용** thinking 수준(`MINIMAL`/`LOW`/`MEDIUM`/`HIGH`). 비우면 `MINIMAL`(운영값). 비교 실험할 때만 바꾸고, 값은 metrics `thinking_level`에 기록된다. 2.5 계열에서는 무시. Cloud Run에는 설정하지 않는다 |
 | `PROMPT_SOURCE` | | 프롬프트 출처. 비우면 `firestore`(운영값). `builtin`이면 Firestore를 읽지 않고 `prompts.py`의 내장 기본 프롬프트(`version=builtin`)만 쓴다. 로컬 비교 실험용 — Cloud Run에는 설정하지 않는다 |
 | `PROMPT_DOC` | | Firestore `prompts` 컬렉션에서 읽을 문서 이름. 비우면 `current`(운영값). 초안 문서(예: `draft`)를 운영 문서 건드리지 않고 시험할 때만 바꾼다(`/` 불가). `PROMPT_SOURCE=builtin`이면 무시. Cloud Run에는 설정하지 않는다 |
 
@@ -130,7 +140,7 @@ python scripts/smoke_test.py <오디오.m4a|.wav> [--photo 사진.jpg ...] [--du
 gcloud run deploy rapid-backend --source backend/ --region asia-northeast3 ^
   --service-account=rapid-backend@match119-504015.iam.gserviceaccount.com ^
   --allow-unauthenticated ^
-  --set-env-vars=PROJECT_ID=match119-504015,REGION=asia-northeast3,BUCKET=rapid-temp-uploads-match119,MODEL=gemini-2.5-flash,VERTEX_LOCATION=asia-northeast1,APP_TOKEN=<공유토큰>
+  --set-env-vars=PROJECT_ID=match119-504015,REGION=asia-northeast3,BUCKET=rapid-temp-uploads-match119,MODEL=gemini-3.5-flash,VERTEX_LOCATION=asia-northeast1,APP_TOKEN=<공유토큰>
 ```
 
 - `--service-account`를 빼먹으면 권한이 넓은 기본 계정으로 돈다. 반드시 지정.

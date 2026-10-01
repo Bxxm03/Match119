@@ -14,6 +14,8 @@
   리비전 `rapid-backend-00001-jrp`. 아래 "Cloud Run 배포 (2026-09-29)" 참고.
 - **배포 URL로 스모크 테스트 15/15 통과** (`Scenario.m4a` 74초).
 - **실기기 테스트 9개 항목 통과 (2026-09-30, S25 Ultra 디버그)** — 아래 "실기기 테스트" 참고.
+- **모델을 `gemini-3.5-flash`(도쿄, `thinking_level=MINIMAL`)로 바꾸는 코드·문서 작업 (`feature/gemini35-flash`)** —
+  2.5 vs 3.5 비교와 thinking 설정 차이는 아래 "모델 전환: 2.5-flash → 3.5-flash". **Cloud Run 배포는 아직 안 함.**
 
 ### 바로 다음 할 일
 
@@ -139,8 +141,8 @@ PoC(Gemini Developer API 키 + Files API + multipart 업로드)를 CLAUDE.md 목
 
 ### 남은 일
 
-- `gemini-2.5-flash`는 **2026-10-20 종료**. 10/7 이후에도 쓰려면 그 전에 도쿄 `gemini-3.5-flash`로 전환하되,
-  보호자 칸 지어냄을 막도록 프롬프트를 보강한 뒤 같은 방식으로 다시 채점한다.
+- `gemini-2.5-flash`는 **2026-10-20 종료**. → 도쿄 `gemini-3.5-flash` 전환 작업 진행 중(아래 "모델 전환" 참고).
+  이번 전환에서는 모델 효과만 보려고 프롬프트(`prompts/current` = `2026-10-01b`)는 바꾸지 않는다.
 
 ### 배포 후 확인 필요
 
@@ -155,6 +157,42 @@ PoC(Gemini Developer API 키 + Files API + multipart 업로드)를 CLAUDE.md 목
   - **2026-09-29 확인 결과(부분):** 배포 URL 스모크 테스트 후 metrics의 `delete_ok: false`는 0건,
     버킷 `sessions/`는 비어 있음. 다만 삭제가 0.07초 만에 끝나 **응답 후 이어지는 경로는 실행되지 않았다 — 여전히 미확인.**
     확인하려면 삭제에 지연을 넣은 리비전을 따로 배포해 재현해야 한다(진행 여부 미정).
+
+## 모델 전환: 2.5-flash → 3.5-flash (2026-10-01~02, 자체 측정)
+
+### thinking 설정이 다르다
+
+- Gemini 3 계열은 `thinking_budget`을 지원하지 않는다. 3.5-flash에 `thinking_budget=0`을 보내자 오디오 요청 5건 중
+  3건이 400 "Thinking budget is not supported for this model"(같은 요청이 성공·실패를 오감. 텍스트만 보낸 6건은 모두 성공).
+  위 2026-09-28 A/B 시험에서 budget 0이 정상이었던 것과 다르다.
+- 그래서 모델 이름이 `gemini-3`으로 시작하면 `thinking_level`(기본 `MINIMAL`, 환경변수 `THINKING_LEVEL`로 변경 가능)을,
+  그 외(2.5)는 지금처럼 `thinking_budget`(기본 0)을 보낸다. 3.5-flash는 thinking을 끌 수 없고 MINIMAL이 최소(공식 문서).
+- 3.5 + MINIMAL로 보낸 50건 모두 `finish_reason=STOP`, `thoughts_tokens=0`, MAX_TOKENS 0건 (`max_output_tokens=4096` 유지).
+- metrics에 `thinking_mode`(`level`/`budget`), `thinking_level`, `thinking_budget`, `thoughts_tokens`, `model`을 기록한다.
+
+### 비교 (test-audio 20개 × 조용/사이렌 SNR 0dB, 케이스당 1회, 프롬프트 `2026-10-01b`·스키마 `2026-10-01e`)
+
+| 조건 | 결과 폴더 (`test-audio/results/`) | 누락율(부정 응답 포함) | 환각 건수 | 환각율(보정 분모) | 환각 발생 케이스 | 추론 평균/최대 |
+|---|---|---|---|---|---|---|
+| 2.5 조용 (운영 Cloud Run) | `eval-20261001-2200-audio` | 11.8% | 6 | 2.9% | 6/20 | 4.1s / 5.5s |
+| 2.5 사이렌 (운영 Cloud Run) | `eval-20261001-2229-complex` | 18.0% | 32 | 16.2% | 15/20 | 4.1s / 5.3s |
+| 3.5 조용 (로컬, MINIMAL) | `eval-20261001-2331-35flash-audio` | 3.9% | 8 | 3.7% | 7/20 | 3.9s / 5.3s |
+| 3.5 사이렌 (로컬, MINIMAL) | `eval-20261001-2334-35flash-complex` | 10.1% | 15 | 7.3% | 8/20 | 4.9s / 10.1s |
+
+- 전체 보고서: `eval-20261001-2334-35flash-complex/_compare4.md` (묶음별·케이스별 표, 판정 근거는 각 폴더 `_scoring.md`).
+- 보정 분모: 3.5는 기타 칸을 마침표 문장으로 써서, 쉼표로만 나누는 기존 분모로는 환각율이 부풀려진다(기존 분모 기준
+  3.5 사이렌 10.6%). 4조건 모두 문장 마침표로도 나눈 분모로 다시 계산한 값.
+- 사이렌으로 늘어난 환각: 2.5 +26건, 3.5 +7건 — **3.5가 소음에 덜 흔들렸다.** 누락 증가 폭은 둘 다 +6.1%p로 같다.
+- 3.5에 남은 위험: 약·병원 이름을 비슷한 소리의 다른 값으로 바꿔 적음(s8 혈압약→당뇨약, s10 갑상선약→전립선약,
+  s13 지어낸 약 이름), s17 "오늘 10시부터 심해짐"(조용·사이렌 모두), AI 의심소견을 진단명 수준으로 적음(s19 "뇌졸중"),
+  보호자 칸을 덜 채움.
+- 한계: 케이스당 1회, 채점자가 조건을 알고 채점, 2.5는 운영 Cloud Run·3.5는 로컬 서버(추론 시간만 비교 가능),
+  s19 사실 6(토함 1번)은 받아쓰기 재확인과 정답지가 엇갈림.
+
+### 롤백
+
+- Cloud Run 환경변수 `MODEL=gemini-2.5-flash`로 재배포(코드 수정 없음) 또는 이전 리비전으로 트래픽 되돌리기.
+  2.5 종료일(2026-10-20)까지만 가능.
 
 ## 실기기 테스트 (2026-09-30, Galaxy S25 Ultra, 디버그 빌드)
 
