@@ -185,7 +185,7 @@ PoC(Gemini Developer API 키 + Files API + multipart 업로드)를 CLAUDE.md 목
   gcloud run services update-traffic rapid-backend --region asia-northeast3 --project match119-504015 --to-revisions=rapid-backend-00002-djk=100
   ```
 
-- **롤백 가능 기간: 2026-10-20까지** — 공식 문서의 `gemini-2.5-flash` 종료일(Retirement date: October 20, 2026,
+- **롤백 가능 기간: 2.5-flash 종료일 2026-10-20 (이후 롤백 불가)** — 공식 문서의 `gemini-2.5-flash` 종료일(Retirement date: October 20, 2026,
   권장 대체 모델 gemini-3.8-flash / 3.5-flash-lite / 3.1-flash-lite). 이후엔 2.5 리비전으로 되돌려도 모델 호출이 실패한다.
   https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/model-versions
   (`gemini-3.5-flash` 종료일은 2027-05-19 이후)
