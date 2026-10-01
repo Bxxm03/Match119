@@ -70,7 +70,7 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 
 ### 모델 호출 시 주의사항 (검증 중 발견)
 
-- `thinkingConfig.thinkingBudget: 0`을 유지한다. thinking을 켜 두면 `maxOutputTokens`가 thinking에
+- `thinkingConfig.thinkingBudget: 0`을 유지한다(2.5 계열). Gemini 3 계열은 `thinking_budget`을 지원하지 않아(3.5-flash 오디오 요청에서 간헐적 400) 코드가 자동으로 `thinkingLevel: MINIMAL`을 보낸다 — thinking을 완전히 끌 수는 없고, metrics `thinking_level`·`thoughts_tokens`에 기록된다. thinking을 켜 두면 `maxOutputTokens`가 thinking에
   먼저 소모되어 `finishReason: MAX_TOKENS`로 빈 응답이 나올 수 있다 — `maxOutputTokens`는 응답 스키마
   전체가 들어갈 만큼 넉넉히 잡을 것.
 - 0.1초짜리 무음 오디오를 넣어도 모델이 소리를 지어냈다(모델마다 다른 내용). `MIN_AUDIO_SECONDS`
@@ -90,7 +90,7 @@ Flutter 앱 ──(1) 업로드 주소 요청──▶ Cloud Run
 | `VERTEX_LOCATION` | ✔ | `asia-northeast1`(도쿄) — Vertex AI 호출 리전. `REGION`과 분리해서, 비상 전환 시 코드 수정 없이 `VERTEX_LOCATION`과 `MODEL`만 바꿔 재배포한다. `global`이면 기동 거부 |
 | `APP_TOKEN` | ✔ | 앱과 공유하는 토큰(`X-RAPID-Token` 헤더). **무단 호출 방지용 최소 보호**이지 보안 인증이 아니다(APK에서 추출 가능). 커밋 금지 |
 | `SIGNER_EMAIL` | 로컬만 | `rapid-backend@match119-504015.iam.gserviceaccount.com` — 로컬 ADC(사용자 계정)에서 Signed URL 서명 주체. Cloud Run에서는 비워 둔다(런타임 서비스 계정 자동 사용) |
-| `THINKING_BUDGET` | | 모델 thinking 토큰 한도. 비우면 `0`(끔, 운영값). 비교 실험할 때만 바꾸고, 값은 metrics `thinking_budget`에 기록된다 |
+| `THINKING_BUDGET` | | 모델 thinking 토큰 한도. 비우면 `0`(끔, 운영값). 비교 실험할 때만 바꾸고, 값은 metrics `thinking_budget`에 기록된다. **Gemini 3 계열(`gemini-3`으로 시작)에는 쓰지 않는다** — 설정하면 기동 거부 |
 | `PROMPT_SOURCE` | | 프롬프트 출처. 비우면 `firestore`(운영값). `builtin`이면 Firestore를 읽지 않고 `prompts.py`의 내장 기본 프롬프트(`version=builtin`)만 쓴다. 로컬 비교 실험용 — Cloud Run에는 설정하지 않는다 |
 | `PROMPT_DOC` | | Firestore `prompts` 컬렉션에서 읽을 문서 이름. 비우면 `current`(운영값). 초안 문서(예: `draft`)를 운영 문서 건드리지 않고 시험할 때만 바꾼다(`/` 불가). `PROMPT_SOURCE=builtin`이면 무시. Cloud Run에는 설정하지 않는다 |
 

@@ -77,6 +77,15 @@ except ValueError:
 if THINKING_BUDGET < 0:
     # -1(모델이 알아서 정함)은 한도를 알 수 없어 max_output_tokens를 다 쓸 수 있다.
     raise SystemExit("THINKING_BUDGET은 0 이상이어야 합니다")
+# Gemini 3 계열은 thinking_budget 대신 thinking_level로 조절한다(둘을 같이 보내면 오류).
+# gemini-3.5-flash는 thinking을 끌 수 없고, 0에 가장 가까운 값이 MINIMAL이다.
+# 3.5-flash에 thinking_budget=0을 보내면 오디오 요청에서 간헐적으로 400
+# ("Thinking budget is not supported for this model")이 났다(2026-10-01 자체 측정).
+# 2.5 모델은 지금처럼 thinking_budget을 쓴다.
+USE_THINKING_LEVEL = MODEL.startswith("gemini-3")
+THINKING_LEVEL = "MINIMAL" if USE_THINKING_LEVEL else None
+if USE_THINKING_LEVEL and os.environ.get("THINKING_BUDGET", "").strip():
+    raise SystemExit("Gemini 3 계열에는 THINKING_BUDGET을 쓰지 않습니다(thinking_level=MINIMAL 고정)")
 # 프롬프트 출처. 비우면 firestore(운영값)이고, builtin이면 Firestore를 읽지 않고
 # 내장 기본 프롬프트만 쓴다 — 프롬프트 비교 실험할 때만 바꾼다.
 PROMPT_SOURCE = os.environ.get("PROMPT_SOURCE", "").strip() or "firestore"
@@ -133,7 +142,8 @@ GENERATION_CONFIG = types.GenerateContentConfig(
     temperature=0,
     # 대화 듣고 정해진 스키마 채우는 작업이라 추론이 필요 없다. thinking을 켜 두면
     # max_output_tokens가 thinking에 먼저 소모되어 MAX_TOKENS로 빈 응답이 나올 수 있다.
-    thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET),
+    thinking_config=(types.ThinkingConfig(thinking_level=THINKING_LEVEL) if USE_THINKING_LEVEL
+                     else types.ThinkingConfig(thinking_budget=THINKING_BUDGET)),
     response_mime_type="application/json",
     response_schema=RESPONSE_SCHEMA,
     # 8필드 한국어 + reasons 배열이 여유 있게 들어가는 크기.
@@ -590,7 +600,9 @@ async def analyze(req: AnalyzeRequest):
         "skipped": None,
         "model": MODEL,
         "vertex_location": VERTEX_LOCATION,
-        "thinking_budget": THINKING_BUDGET,
+        # 실제로 보낸 thinking 설정 — 둘 중 하나만 값이 있다(Gemini 3 계열은 level).
+        "thinking_budget": None if USE_THINKING_LEVEL else THINKING_BUDGET,
+        "thinking_level": THINKING_LEVEL,
         "thoughts_tokens": None,  # 모델이 실제로 thinking에 쓴 토큰
         "prompt_version": None,
         "schema_version": SCHEMA_VERSION,  # 코드가 소유한 칸 설명의 버전
