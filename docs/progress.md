@@ -252,6 +252,32 @@ PoC(Gemini Developer API 키 + Files API + multipart 업로드)를 CLAUDE.md 목
   gcloud run services update-traffic rapid-backend --region asia-northeast3 --project match119-504015 --to-revisions=rapid-backend-g35-2567176=100
   ```
 
+### 운영 반영 후 v1으로 롤백 (2026-10-02)
+
+- v2를 리비전 `rapid-backend-fieldsv2-352c31f`(태그 `fv2`)로 배포했다. 운영 트래픽 100%로 측정한 뒤, 칸 설명 v1(schema `2026-10-01e`)으로 롤백했다.
+  - 롤백 방식: 트래픽만 `rapid-backend-g35-2567176`으로 100% 옮겼다. 재배포·환경변수 변경은 없다.
+  - 확인: 운영 URL로 1건 측정(`eval-20261002-1412-rollback-v1-check-audio`) → schema `2026-10-01e`, prompt `2026-10-01b`, 원본 삭제 성공
+  - main에서는 `352c31f`를 `git revert`로 되돌렸다. 그래서 `backend/`는 `2567176`과 같다.
+- 롤백 사유: v2에서 새 환각 유형이 확인되어, 엄격 기준의 환각이 늘었다.
+  - **성별 추정**: 나이를 말한 케이스에 대화에 없는 "남성"을 덧붙인다(조용·사이렌 각 4건).
+  - **약 이름 → 병명 추론**: "혈압약"을 보고 "병력: 고혈압", "빈혈약"을 보고 "병력: 빈혈" 등을 적는다.
+  - 운영 v2 조용 환각은 15건이다. 운영 v1 2·3회차는 6·9건이었다.
+    - 성별 추정·약→병명 추론을 빼면 8건이다.
+    - 같은 기준으로 셌을 때, 이 두 유형은 v1 결과에는 없다.
+  - 사이렌 환각은 19건이다(v1 14·17건). 누락은 조용 3.5%·사이렌 9.2%로 v1(4.4~4.8%·11.0%)과 비슷하거나 조금 낮다.
+  - 자체 측정, 케이스당 1회, 사이렌은 합성(SNR 0dB)이다.
+- 측정 결과 폴더(`test-audio/results/`):
+  - 로컬 v2: `eval-20261002-1313-local-fields-v2-audio`, `eval-20261002-1315-local-fields-v2-complex`(비교 보고서 `_compare_fields.md`)
+  - 운영 v2: `eval-20261002-1351-final-prod-v2-audio`, `eval-20261002-1354-final-prod-v2-complex`(보고서 `_final_metrics.md`)
+- v2 리비전 `rapid-backend-fieldsv2-352c31f`와 태그 `fv2`는 지우지 않고 남겨 두었다. 코드는 `exp/fields-v2` 브랜치에 있다.
+  - 다시 v2로 전환할 때(재배포 없이 트래픽만 옮김):
+
+  ```
+  gcloud run services update-traffic rapid-backend --region asia-northeast3 --project match119-504015 --to-revisions=rapid-backend-fieldsv2-352c31f=100
+  ```
+
+  - 이때 main 코드(v1)와 운영(v2)이 달라진다. 그래서 main에도 v2를 다시 반영해야 한다(`git revert`로 되돌린 커밋 `0d78608`을 다시 revert).
+
 ## 실기기 테스트 (2026-09-30, Galaxy S25 Ultra, 디버그 빌드)
 
 | 항목 | 결과 |
